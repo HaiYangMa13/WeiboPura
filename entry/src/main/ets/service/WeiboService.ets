@@ -95,6 +95,17 @@ interface WeiboPictureSizeJson {
   url?: string;
 }
 
+/** Desktop surfaces return one of these per picture inside the `pic_infos` map. */
+interface WeiboPictureInfoJson {
+  thumbnail?: WeiboPictureSizeJson;
+  bmiddle?: WeiboPictureSizeJson;
+  large?: WeiboPictureSizeJson;
+  original?: WeiboPictureSizeJson;
+  largest?: WeiboPictureSizeJson;
+  mw2000?: WeiboPictureSizeJson;
+  largecover?: WeiboPictureSizeJson;
+}
+
 /** The video URL variants used by the mobile status API. */
 interface WeiboVideoUrlsJson {
   mp4_1080p_60fps?: string;
@@ -111,17 +122,40 @@ interface WeiboVideoMediaInfoJson {
   stream_url_h5?: string;
   mp4_hd_mp4?: string;
   mp4_720p_mp4?: string;
+  /** Desktop video pages carry the full-size poster here. */
+  big_pic_info?: WeiboPagePictureInfoJson;
 }
 
 interface WeiboPagePictureJson {
   url?: string;
 }
 
+/** One size entry of a video poster, used by `pic_info` and `big_pic_info`. */
+interface WeiboPagePictureSizeJson {
+  url?: string;
+  width?: string | number;
+  height?: string | number;
+}
+
+/** Video posters ship as three named sizes instead of one flat url. */
+interface WeiboPagePictureInfoJson {
+  pic_big?: WeiboPagePictureSizeJson;
+  pic_middle?: WeiboPagePictureSizeJson;
+  pic_small?: WeiboPagePictureSizeJson;
+}
+
 interface WeiboPageInfoJson {
   type?: string;
+  object_type?: string;
   urls?: WeiboVideoUrlsJson;
   media_info?: WeiboVideoMediaInfoJson;
-  page_pic?: WeiboPagePictureJson;
+  /**
+   * Mobile containers nest the poster as `{ url }`, desktop pages send a bare
+   * url string. Reading only the nested form leaves every desktop video card
+   * without a poster.
+   */
+  page_pic?: WeiboPagePictureJson | string;
+  pic_info?: WeiboPagePictureInfoJson;
 }
 
 interface WeiboPostJson {
@@ -136,9 +170,16 @@ interface WeiboPostJson {
   reposts_count?: number;
   attitudes_status?: number;
   user?: WeiboUserJson;
+  /** Mobile containers ship a ready-made picture list. */
   pics?: WeiboPictureJson[];
+  /** Desktop surfaces ship ordered ids plus a `pic_infos` map and no `pics`. */
+  pic_ids?: string[];
+  pic_infos?: Record<string, WeiboPictureInfoJson>;
   page_info?: WeiboPageInfoJson;
   video_url?: string;
+  /** Legacy pre-`pic_ids` picture fields. */
+  original_pic?: string;
+  bmiddle_pic?: string;
   thumbnail_pic?: string;
   retweeted_status?: WeiboPostJson;
 }
@@ -536,24 +577,105 @@ export class WeiboService {
     };
   }
 
-  private toPost(source: WeiboPostJson): WeiboPost {
-    const author: WeiboUser = this.toUser(source.user ?? {});
+  /**
+   * Picture URLs for one post. The mobile containers ship a `pics` array, while
+   * the desktop web endpoints (the following timeline reads
+   * `weibo.com/ajax/feed/friendstimeline`) ship `pic_ids` plus a `pic_infos` map
+   * and never include `pics`. Reading only `pics` silently drops every picture
+   * from the desktop feed, so both shapes are parsed here.
+   */
+  private pictureUrls(source: WeiboPostJson): string[] {
     const pictures: string[] = [];
+    const seen: Record<string, boolean> = {};
     const pictureSource: WeiboPictureJson[] = source.pics ?? [];
     for (let index: number = 0; index < pictureSource.length; index++) {
       const picture: WeiboPictureJson = pictureSource[index];
       // The mobile endpoint normally returns the original file in `original`.
       // Keep high-quality fallbacks for cards whose original field is omitted.
-      const imageUrl: string = picture.original?.url
+      this.pushPictureUrl(pictures, seen, picture.original?.url
         ?? picture.largest?.url
         ?? picture.mw2000?.url
         ?? picture.large?.url
         ?? picture.url
-        ?? '';
-      if (imageUrl.length > 0) {
-        pictures.push(imageUrl);
+        ?? '');
+    }
+    if (pictures.length === 0) {
+      const infos: Record<string, WeiboPictureInfoJson> | undefined = source.pic_infos;
+      if (infos !== undefined) {
+        // `pic_ids` preserves the author's order; the map alone has no order.
+        const ids: string[] = source.pic_ids ?? Object.keys(infos);
+        for (let index: number = 0; index < ids.length; index++) {
+          const info: WeiboPictureInfoJson | undefined = infos[ids[index]];
+          if (info === undefined) {
+            continue;
+          }
+          this.pushPictureUrl(pictures, seen, info.original?.url
+            ?? info.largest?.url
+            ?? info.mw2000?.url
+            ?? info.large?.url
+            ?? info.largecover?.url
+            ?? info.bmiddle?.url
+            ?? info.thumbnail?.url
+            ?? '');
+        }
       }
     }
+    if (pictures.length === 0) {
+      // Legacy picture fields predate `pic_ids`. `thumbnail_pic` is left out on
+      // purpose: it doubles as the video cover, and using it here would turn a
+      // video post into a still picture card.
+      this.pushPictureUrl(pictures, seen, source.original_pic ?? source.bmiddle_pic ?? '');
+    }
+    return pictures;
+  }
+
+  private pushPictureUrl(pictures: string[], seen: Record<string, boolean>, url: string): void {
+    const clean: string = url.trim();
+    if (clean.length === 0 || seen[clean] === true) {
+      return;
+    }
+    seen[clean] = true;
+    pictures.push(clean);
+  }
+
+  /** `page_pic` is a bare url string on desktop pages and `{ url }` on mobile. */
+  private pagePictureUrl(pagePic: WeiboPagePictureJson | string | undefined): string {
+    if (pagePic === undefined) {
+      return '';
+    }
+    if (typeof pagePic === 'string') {
+      return pagePic.trim();
+    }
+    return pagePic.url?.trim() ?? '';
+  }
+
+  /**
+   * Poster image for a video card. Desktop pages expose the full-size poster as
+   * `media_info.big_pic_info.pic_big`, a middle one as `pic_info.pic_big` and a
+   * small one as the string `page_pic`; mobile pages only have `page_pic`. The
+   * largest available wins so the card and its preview stay sharpest.
+   */
+  private videoCoverUrl(source: WeiboPostJson): string {
+    const pageInfo: WeiboPageInfoJson | undefined = source.page_info;
+    const mediaInfo: WeiboVideoMediaInfoJson | undefined = pageInfo?.media_info;
+    const candidates: string[] = [
+      mediaInfo?.big_pic_info?.pic_big?.url ?? '',
+      pageInfo?.pic_info?.pic_big?.url ?? '',
+      this.pagePictureUrl(pageInfo?.page_pic),
+      source.thumbnail_pic ?? '',
+    ];
+    for (let index: number = 0; index < candidates.length; index++) {
+      const candidate: string = candidates[index].trim();
+      if (candidate.length > 0) {
+        return candidate;
+      }
+    }
+    return '';
+  }
+
+  private toPost(source: WeiboPostJson): WeiboPost {
+    const author: WeiboUser = this.toUser(source.user ?? {});
+    const pictures: string[] = this.pictureUrls(source);
     const pageInfo: WeiboPageInfoJson | undefined = source.page_info;
     const mediaInfo: WeiboVideoMediaInfoJson | undefined = pageInfo?.media_info;
     const videoUrls: WeiboVideoUrlsJson | undefined = pageInfo?.urls;
@@ -569,7 +691,7 @@ export class WeiboService {
       ?? videoUrls?.mp4_ld_mp4
       ?? source.video_url
       ?? '';
-    const videoCoverUrl: string = pageInfo?.page_pic?.url ?? source.thumbnail_pic ?? '';
+    const videoCoverUrl: string = this.videoCoverUrl(source);
     const repostSource: WeiboPostJson | undefined = source.retweeted_status;
     const rawPostId: string | number | undefined = source.id ?? source.mid;
     const postId: string = rawPostId === undefined ? '' : `${rawPostId}`;
