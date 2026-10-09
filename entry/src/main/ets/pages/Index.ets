@@ -19,6 +19,7 @@ import { ImmBlur, ImmMaterial, MaterialManager, Radius, Spacing, Theme, fs, init
 import { UsageHabitsManager } from '../service/UsageHabitsManager';
 import { WeiboAuthManager } from '../service/WeiboAuthManager';
 import { AppSettingsStore, DEFAULT_HOME_TAB_MATERIAL_LEVEL } from '../service/AppSettingsStore';
+import { createWeiboDockStyle } from '../common/WeiboDockStyle';
 import { WeiboService } from '../service/WeiboService';
 import { WeiboHotTopic, WeiboNotification, WeiboPost, WeiboUser } from '../model/WeiboModel';
 import { WeiboHomeTab, WeiboTimelineMode } from './WeiboHomeTab';
@@ -513,23 +514,8 @@ struct Index {
       .vertical(false)
       .barPosition(BarPosition.End)
       .barHeight(HDS_TAB_BAR_HEIGHT)
-      .barFloatingStyle({
-        adaptToHandedness: true,
-        barBottomMargin: 30,
-        lightColor: this.accentColor,
-        systemMaterialEffect: {
-          materialType: hdsMaterial.MaterialType.IMMERSIVE,
-          materialLevel: this.resolveHomeTabMaterialLevel()
-        }
-      });
+      .barFloatingStyle(createWeiboDockStyle(this.homeTabMaterialLevel, this.accentColor));
     this.hdsTabsModifier = modifier;
-  }
-
-  private resolveHomeTabMaterialLevel(): hdsMaterial.MaterialLevel {
-    if (this.homeTabMaterialLevel === 0) { return hdsMaterial.MaterialLevel.EXQUISITE; }
-    if (this.homeTabMaterialLevel === 1) { return hdsMaterial.MaterialLevel.GENTLE; }
-    if (this.homeTabMaterialLevel === 2) { return hdsMaterial.MaterialLevel.SMOOTH; }
-    return hdsMaterial.MaterialLevel.ADAPTIVE;
   }
 
   /** Match PaperTalk: convert the current window's raw top avoid area at layout time. */

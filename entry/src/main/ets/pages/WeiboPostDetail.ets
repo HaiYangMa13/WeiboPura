@@ -8,7 +8,9 @@ import { ImmBlur, ImmMaterial, MaterialManager, Radius, Spacing, Theme, fs, isDa
 import { ShareUtil } from '../common/ShareUtil';
 import { Haptic } from '../common/Haptic';
 import { WeiboVideoPlayer } from '../components/WeiboVideoPlayer';
-import { DividerShowType, HdsNavDestination, HdsNavDestinationTitleMode, HdsTabs, hdsMaterial, ScrollEffectType } from '@kit.UIDesignKit';
+import { DividerShowType, HdsNavDestination, HdsNavDestinationTitleMode, HdsTabs, HdsTabsController, HdsTabsModifier, HdsAnimationMode, hdsMaterial, ScrollEffectType } from '@kit.UIDesignKit';
+import { createWeiboDockStyle } from '../common/WeiboDockStyle';
+import { DEFAULT_HOME_TAB_MATERIAL_LEVEL } from '../service/AppSettingsStore';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { uniformTypeDescriptor as utd } from '@kit.ArkData';
 import { fileIo, fileUri } from '@kit.CoreFileKit';
@@ -71,7 +73,7 @@ export struct WeiboPostDetail {
   @State postId: string = '';
   @State post: WeiboPost | null = null;
   @State comments: WeiboComment[] = [];
-  @State loading: boolean = true;
+  @State @Watch('syncComposerDockVisibility') loading: boolean = true;
   @State commentsLoading: boolean = false;
   @State commentsPage: number = 1;
   @State commentsSort: WeiboCommentSort = WeiboCommentSort.Hot;
@@ -94,8 +96,13 @@ export struct WeiboPostDetail {
   private commentLikeVersion: number = 0;
   private commentLikeMutations: Map<string, CommentLikeMutation> = new Map();
   @State commentDraft: string = '';
-  @State commentComposerHidden: boolean = false;
-  @State commentEditorOpen: boolean = false;
+  @State @Watch('syncComposerDockVisibility') commentComposerHidden: boolean = false;
+  @State @Watch('syncComposerDockVisibility') commentEditorOpen: boolean = false;
+  private composerTabsController: HdsTabsController = new HdsTabsController();
+  @State composerTabsModifier: HdsTabsModifier = new HdsTabsModifier();
+  @StorageLink('homeTabMaterialLevel') @Watch('configureComposerDock')
+  homeTabMaterialLevel: number = DEFAULT_HOME_TAB_MATERIAL_LEVEL;
+  @StorageLink('appAccentColor') @Watch('configureComposerDock') accentColor: string = '#4EAA78';
   private commentInputFocused: boolean = false;
   private commentEditorController: TextAreaController = new TextAreaController();
   private commentSelectionStart: number = 0;
@@ -137,6 +144,7 @@ export struct WeiboPostDetail {
   @State videoLoadFailed: boolean = false;
 
   async aboutToAppear(): Promise<void> {
+    this.configureComposerDock();
     const context: common.UIAbilityContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
     await WeiboAuthManager.getInstance().init(context);
     loadWeiboEmojiAssets(context);
@@ -462,7 +470,20 @@ export struct WeiboPostDetail {
     }
   }
 
-  private commentComposerHeight: number = 96;
+  private configureComposerDock(): void {
+    const modifier: HdsTabsModifier = new HdsTabsModifier();
+    modifier.vertical(false).barPosition(BarPosition.End).barHeight(56)
+      .barFloatingStyle(createWeiboDockStyle(this.homeTabMaterialLevel, this.accentColor, 400));
+    this.composerTabsModifier = modifier;
+  }
+
+  private syncComposerDockVisibility(): void {
+    if (this.loading || this.commentComposerHidden || this.commentEditorOpen || this.post === null) {
+      this.composerTabsController.applyHideAnimation(HdsAnimationMode.SCROLL_ANIMATION);
+    } else {
+      this.composerTabsController.applyShowAnimation(HdsAnimationMode.SCROLL_ANIMATION);
+    }
+  }
 
   private setComposerVisible(visible: boolean): void {
     if (visible) { this.composerScrollState.reset(); }
@@ -1472,8 +1493,107 @@ export struct WeiboPostDetail {
     }
   }
 
+  // Content only: the native HdsTabs slot owns the material and gradient backplate.
   @Builder
   BottomComposer() {
+    Row({ space: 10 }) {
+      // 1. 左侧沉降输入胶囊（说点什么...）
+      Row({ space: 8 }) {
+        SymbolGlyph($r('sys.symbol.square_and_pencil'))
+          .fontSize(fs(16, this.fontScale))
+          .fontColor([Theme.textTertiary(this.isDark)])
+        Text(this.commentDraft.length > 0 ? this.commentDraft : '说点什么...')
+          .fontSize(fs(13.5, this.fontScale))
+          .fontColor(this.commentDraft.length > 0 ? Theme.textPrimary(this.isDark) : Theme.textSecondary(this.isDark))
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .layoutWeight(1)
+      }
+      .layoutWeight(1)
+      .height(38)
+      .padding({ left: 14, right: 14 })
+      .borderRadius(19)
+      .backgroundColor(this.isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.04)')
+      .accessibilityText('写评论')
+      .onClick((): void => {
+        this.replyTargetComment = null;
+        this.openCommentEditor();
+      })
+
+      // 2. 右侧三个功能项（横向并列：点赞、收藏、评论）
+      Row({ space: 4 }) {
+        // 点赞 (Heart + count)
+        Row({ space: 3 }) {
+          SymbolGlyph((this.post !== null && this.post.isLiked) ? $r('sys.symbol.heart_fill') : $r('sys.symbol.heart'))
+            .fontSize(fs(20, this.fontScale))
+            .fontColor([(this.post !== null && this.post.isLiked) ? '#E05252' : Theme.textPrimary(this.isDark)])
+          Text(this.post !== null && this.post.likeCount > 0 ? this.formatCount(this.post.likeCount) : '赞')
+            .fontSize(fs(12.5, this.fontScale))
+            .fontWeight(FontWeight.Medium)
+            .fontColor((this.post !== null && this.post.isLiked) ? '#E05252' : Theme.textPrimary(this.isDark))
+        }
+        .height(38)
+        .padding({ left: 6, right: 6 })
+        .borderRadius(19)
+        .alignItems(VerticalAlign.Center)
+        .hitTestBehavior(HitTestMode.Default)
+        .accessibilityText((this.post !== null && this.post.isLiked) ? '取消点赞' : '点赞')
+        .onClick((): void => {
+          if (this.post !== null) {
+            this.toggleLike();
+          }
+        })
+
+        // 收藏 (Star + count)
+        Row({ space: 3 }) {
+          SymbolGlyph((this.post !== null && this.post.isFavorited) ? $r('sys.symbol.star_fill') : $r('sys.symbol.star'))
+            .fontSize(fs(20, this.fontScale))
+            .fontColor([(this.post !== null && this.post.isFavorited) ? '#F59E0B' : Theme.textPrimary(this.isDark)])
+          Text(this.post !== null && this.post.repostCount > 0 ? this.formatCount(this.post.repostCount) : (this.post?.isFavorited ? '已藏' : '收藏'))
+            .fontSize(fs(12.5, this.fontScale))
+            .fontWeight(FontWeight.Medium)
+            .fontColor((this.post !== null && this.post.isFavorited) ? '#F59E0B' : Theme.textPrimary(this.isDark))
+        }
+        .height(38)
+        .padding({ left: 6, right: 6 })
+        .borderRadius(19)
+        .alignItems(VerticalAlign.Center)
+        .hitTestBehavior(HitTestMode.Default)
+        .accessibilityText((this.post !== null && this.post.isFavorited) ? '取消收藏' : '收藏')
+        .onClick((): void => {
+          this.toggleFavorite();
+        })
+
+        // 评论 (Message + count)
+        Row({ space: 3 }) {
+          SymbolGlyph($r('sys.symbol.message'))
+            .fontSize(fs(20, this.fontScale))
+            .fontColor([Theme.textPrimary(this.isDark)])
+          Text(this.post !== null && this.post.commentCount > 0 ? this.formatCount(this.post.commentCount) : '评论')
+            .fontSize(fs(12.5, this.fontScale))
+            .fontWeight(FontWeight.Medium)
+            .fontColor(Theme.textPrimary(this.isDark))
+        }
+        .height(38)
+        .padding({ left: 6, right: 6 })
+        .borderRadius(19)
+        .alignItems(VerticalAlign.Center)
+        .hitTestBehavior(HitTestMode.Default)
+        .accessibilityText('查看评论')
+        .onClick((): void => {
+          this.scrollToComments();
+        })
+      }
+    }
+    .height(56)
+    .padding({ left: 12, right: 8 })
+    .alignItems(VerticalAlign.Center)
+    .width('100%')
+    .enabled(this.post !== null && !this.loading && !this.commentEditorOpen && !this.commentComposerHidden)
+  }
+
+  @Builder
+  ComposerAttachments() {
     Column() {
       if (this.commentUploadHint.length > 0) {
         Text(this.commentUploadHint)
@@ -1502,118 +1622,11 @@ export struct WeiboPostDetail {
         .margin({ bottom: 6 })
       }
 
-      // 方案 A：1:1 对齐外部 HDS 悬浮 Tab 栏微质感独立悬浮胶囊
-      Row({ space: 10 }) {
-        // 1. 左侧沉降输入胶囊（说点什么...）
-        Row({ space: 8 }) {
-          SymbolGlyph($r('sys.symbol.square_and_pencil'))
-            .fontSize(fs(16, this.fontScale))
-            .fontColor([Theme.textTertiary(this.isDark)])
-          Text(this.commentDraft.length > 0 ? this.commentDraft : '说点什么...')
-            .fontSize(fs(13.5, this.fontScale))
-            .fontColor(this.commentDraft.length > 0 ? Theme.textPrimary(this.isDark) : Theme.textSecondary(this.isDark))
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .layoutWeight(1)
-        }
-        .layoutWeight(1)
-        .height(38)
-        .padding({ left: 14, right: 14 })
-        .borderRadius(19)
-        .backgroundColor(this.isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.04)')
-        .accessibilityText('写评论')
-        .onClick((): void => {
-          this.replyTargetComment = null;
-          this.openCommentEditor();
-        })
-
-        // 2. 右侧三个功能项（横向并列：点赞、收藏、评论）
-        Row({ space: 4 }) {
-          // 点赞 (Heart + count)
-          Row({ space: 3 }) {
-            SymbolGlyph((this.post !== null && this.post.isLiked) ? $r('sys.symbol.heart_fill') : $r('sys.symbol.heart'))
-              .fontSize(fs(20, this.fontScale))
-              .fontColor([(this.post !== null && this.post.isLiked) ? '#E05252' : Theme.textPrimary(this.isDark)])
-            Text(this.post !== null && this.post.likeCount > 0 ? this.formatCount(this.post.likeCount) : '赞')
-              .fontSize(fs(12.5, this.fontScale))
-              .fontWeight(FontWeight.Medium)
-              .fontColor((this.post !== null && this.post.isLiked) ? '#E05252' : Theme.textPrimary(this.isDark))
-          }
-          .height(38)
-          .padding({ left: 6, right: 6 })
-          .borderRadius(19)
-          .alignItems(VerticalAlign.Center)
-          .hitTestBehavior(HitTestMode.Default)
-          .accessibilityText((this.post !== null && this.post.isLiked) ? '取消点赞' : '点赞')
-          .onClick((): void => {
-            if (this.post !== null) {
-              this.toggleLike();
-            }
-          })
-
-          // 收藏 (Star + count)
-          Row({ space: 3 }) {
-            SymbolGlyph((this.post !== null && this.post.isFavorited) ? $r('sys.symbol.star_fill') : $r('sys.symbol.star'))
-              .fontSize(fs(20, this.fontScale))
-              .fontColor([(this.post !== null && this.post.isFavorited) ? '#F59E0B' : Theme.textPrimary(this.isDark)])
-            Text(this.post !== null && this.post.repostCount > 0 ? this.formatCount(this.post.repostCount) : (this.post?.isFavorited ? '已藏' : '收藏'))
-              .fontSize(fs(12.5, this.fontScale))
-              .fontWeight(FontWeight.Medium)
-              .fontColor((this.post !== null && this.post.isFavorited) ? '#F59E0B' : Theme.textPrimary(this.isDark))
-          }
-          .height(38)
-          .padding({ left: 6, right: 6 })
-          .borderRadius(19)
-          .alignItems(VerticalAlign.Center)
-          .hitTestBehavior(HitTestMode.Default)
-          .accessibilityText((this.post !== null && this.post.isFavorited) ? '取消收藏' : '收藏')
-          .onClick((): void => {
-            this.toggleFavorite();
-          })
-
-          // 评论 (Message + count)
-          Row({ space: 3 }) {
-            SymbolGlyph($r('sys.symbol.message'))
-              .fontSize(fs(20, this.fontScale))
-              .fontColor([Theme.textPrimary(this.isDark)])
-            Text(this.post !== null && this.post.commentCount > 0 ? this.formatCount(this.post.commentCount) : '评论')
-              .fontSize(fs(12.5, this.fontScale))
-              .fontWeight(FontWeight.Medium)
-              .fontColor(Theme.textPrimary(this.isDark))
-          }
-          .height(38)
-          .padding({ left: 6, right: 6 })
-          .borderRadius(19)
-          .alignItems(VerticalAlign.Center)
-          .hitTestBehavior(HitTestMode.Default)
-          .accessibilityText('查看评论')
-          .onClick((): void => {
-            this.scrollToComments();
-          })
-        }
-      }
-      .height(56)
-      .padding({ left: 12, right: 8 })
-      .borderRadius(28)
-      .backgroundColor(this.isDark ? 'rgba(28, 34, 30, 0.85)' : 'rgba(255, 255, 255, 0.88)')
-      .backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)
-      .border({ width: 0.5, color: Theme.manualGlassBorder() })
-      .shadow(Theme.feedCardShadow(this.isDark))
-      .alignItems(VerticalAlign.Center)
     }
-    .margin({
-      left: 16,
-      right: 16,
-      bottom: Math.max(14, this.navigationIndicatorHeight + 10)
-    })
-    .onAreaChange((_old: Area, area: Area): void => {
-      this.commentComposerHeight = Number(area.height) + Math.max(14, this.navigationIndicatorHeight + 10);
-    })
-    .translate({ y: this.commentComposerHidden || this.commentEditorOpen ? this.commentComposerHeight + 24 : 0 })
-    .opacity(this.commentComposerHidden || this.commentEditorOpen ? 0 : 1)
-    .hitTestBehavior(this.commentComposerHidden || this.commentEditorOpen ? HitTestMode.None : HitTestMode.Default)
-    .accessibilityLevel(this.commentComposerHidden || this.commentEditorOpen ? 'no-hide-descendants' : 'auto')
-    .animation({ duration: 240, curve: Curve.FastOutSlowIn })
+    .width('100%')
+    .constraintSize({ maxWidth: 400 })
+    .padding({ left: 16, right: 16 })
+    .margin({ bottom: this.navigationIndicatorHeight + 96 })
   }
 
   /** 鸿蒙原生沉浸式微质感悬浮回复卡片 */
@@ -1766,54 +1779,72 @@ export struct WeiboPostDetail {
   @Builder
   DetailContent() {
     Stack({ alignContent: Alignment.Bottom }) {
-      Scroll(this.detailScroller) {
-        Column() {
-          if (this.loading) {
-            LoadingProgress().width(28).height(28).margin({ top: 120 })
-          } else if (this.errorMessage.length > 0) {
-            Column({ space: Spacing.md }) {
-              Text(this.errorMessage)
-                .fontSize(fs(14, this.fontScale))
-                .fontColor(Theme.danger())
-                .textAlign(TextAlign.Center)
-              Button($r('app.string.weibo_load'))
-                .fontSize(fs(14, this.fontScale))
-                .onClick(() => { this.loadPost(); })
+      HdsTabs({ controller: this.composerTabsController }) {
+        TabContent() {
+        Scroll(this.detailScroller) {
+          Column() {
+            if (this.loading) {
+              LoadingProgress().width(28).height(28).margin({ top: 120 })
+            } else if (this.errorMessage.length > 0) {
+              Column({ space: Spacing.md }) {
+                Text(this.errorMessage)
+                  .fontSize(fs(14, this.fontScale))
+                  .fontColor(Theme.danger())
+                  .textAlign(TextAlign.Center)
+                Button($r('app.string.weibo_load'))
+                  .fontSize(fs(14, this.fontScale))
+                  .onClick(() => { this.loadPost(); })
+              }
+              .width('100%')
+              .alignItems(HorizontalAlign.Center)
+              .margin({ top: 120 })
+            } else if (this.post !== null) {
+              Column() {
+                this.PostBody({ post: this.post })
+                this.CommentsSection()
+              }
+              .width('100%')
+              .opacity(this.contentOpacity)
+              .translate({ y: this.contentTranslateY })
+              .scale({ x: this.contentScale, y: this.contentScale })
+              .renderGroup(true)
             }
-            .width('100%')
-            .alignItems(HorizontalAlign.Center)
-            .margin({ top: 120 })
-          } else if (this.post !== null) {
-            Column() {
-              this.PostBody({ post: this.post })
-              this.CommentsSection()
-            }
-            .width('100%')
-            .opacity(this.contentOpacity)
-            .translate({ y: this.contentTranslateY })
-            .scale({ x: this.contentScale, y: this.contentScale })
-            .renderGroup(true)
           }
+          .width('100%')
+          .padding({
+            left: 12,
+            right: 12,
+            top: this.statusBarHeight + 64,
+            bottom: this.navigationIndicatorHeight + 92 + (this.commentImage.length > 0 ? 80 : 0)
+          })
         }
         .width('100%')
-        .padding({
-          left: 12,
-          right: 12,
-          top: this.statusBarHeight + 64,
-          bottom: this.navigationIndicatorHeight + 92 + (this.commentImage.length > 0 ? 80 : 0)
+        .height('100%')
+        .scrollBar(BarState.Off)
+        .edgeEffect(EdgeEffect.Spring)
+        .onAreaChange((_old: Area, area: Area): void => {
+          this.detailViewportBottom = Number(area.globalPosition.y) + Number(area.height);
         })
+        .onDidScroll((_xOffset: number, yOffset: number, state: ScrollState): void => { this.onDetailScroll(yOffset, state); })
+        .onScrollEdge((edge: Edge): void => { if (edge === Edge.Bottom) { this.loadMoreComments(true); } })
+        }
+        .tabBar(this.BottomComposer())
       }
       .width('100%')
       .height('100%')
-      .scrollBar(BarState.Off)
-      .edgeEffect(EdgeEffect.Spring)
-      .onAreaChange((_old: Area, area: Area): void => {
-        this.detailViewportBottom = Number(area.globalPosition.y) + Number(area.height);
+      .barPosition(BarPosition.End)
+      .barOverlap(true)
+      .scrollable(false)
+      .animationDuration(0)
+      .attributeModifier(this.composerTabsModifier)
+      .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
+      .onAppear((): void => {
+        this.composerTabsController.bindScroller(0, this.detailScroller);
+        this.syncComposerDockVisibility();
       })
-      .onDidScroll((_xOffset: number, yOffset: number, state: ScrollState): void => { this.onDetailScroll(yOffset, state); })
-      .onScrollEdge((edge: Edge): void => { if (edge === Edge.Bottom) { this.loadMoreComments(true); } })
-      if (this.post !== null && !this.loading) {
-        this.BottomComposer()
+      .onDisAppear((): void => { this.composerTabsController.unbindScroller(this.detailScroller); })
+      if (!this.commentComposerHidden && !this.commentEditorOpen && this.post !== null && !this.loading) {
+        this.ComposerAttachments()
       }
 
       // 华为官方最佳实践键盘避让沉浸式弹窗层：Stack + expandSafeArea + keyboardHeight 自适应抬升

@@ -653,10 +653,12 @@ test('comment reply editor uses floating frosted capsule design and sage green t
 test('persistent comment bar uses Option A floating glass capsule design', () => {
   const fs = require('node:fs'), path = require('node:path');
   const detailSrc = fs.readFileSync(path.resolve(__dirname, '../entry/src/main/ets/pages/WeiboPostDetail.ets'), 'utf8');
-  assert.ok(detailSrc.includes('.borderRadius(28)'), '底栏常驻评论框需具备 28vp 独立胶囊大圆角');
-  assert.ok(detailSrc.includes('.height(56)'), '底栏常驻评论框高度需对齐 HDS 悬浮 Tab');
-  assert.ok(detailSrc.includes('backgroundBlurStyle(BlurStyle.COMPONENT_ULTRA_THICK)'), '需使用超厚度磨砂材质');
-  assert.ok(detailSrc.includes('Theme.feedCardShadow'), '需具备悬浮投影');
+  assert.ok(detailSrc.includes('.tabBar(this.BottomComposer())'), '评论胶囊必须位于原生 HDS 悬浮槽位');
+  assert.ok(detailSrc.includes('.barHeight(56)'), '底栏高度需对齐 HDS 悬浮 Tab');
+  assert.ok(detailSrc.includes('.barFloatingStyle(createWeiboDockStyle('), '材质和渐变背板必须与信息流共用配置');
+  const composer = detailSrc.slice(detailSrc.indexOf('  BottomComposer()'), detailSrc.indexOf('  ComposerAttachments()'));
+  assert.ok(!composer.includes('backgroundBlurStyle'), '不得用普通毛玻璃冒充原生悬浮材质');
+  assert.ok(!composer.includes('.shadow('), '投影交给 HDS，避免自绘双重阴影');
   assert.ok(!detailSrc.includes("border({ width: { top: 0.5 }"), '不得使用贴底通栏硬分割线');
 });
 
