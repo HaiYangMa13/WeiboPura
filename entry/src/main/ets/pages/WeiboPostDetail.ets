@@ -32,6 +32,10 @@ export interface WeiboPostDetailRouteParam {
   postId: string;
 }
 
+// Pass an object literal so PostBody observes replacement of the post state.
+interface PostBodyParams {
+  post: WeiboPost;
+}
 
 interface CommentLikeMutation {
   liked: boolean;
@@ -1178,18 +1182,18 @@ export struct WeiboPostDetail {
   }
 
   @Builder
-  PostBody(currentPost: WeiboPost) {
+  PostBody(params: PostBodyParams) {
     Column({ space: Spacing.md }) {
       Row({ space: Spacing.sm }) {
-        if (currentPost.userAvatar.length > 0) {
-          Image(currentPost.userAvatar)
+        if (params.post.userAvatar.length > 0) {
+          Image(params.post.userAvatar)
             .width(44)
             .height(44)
             .borderRadius(Radius.full)
             .objectFit(ImageFit.Cover)
         } else {
           Stack() {
-            Text(currentPost.userName.substring(0, 1))
+            Text(params.post.userName.substring(0, 1))
               .fontSize(fs(17, this.fontScale))
               .fontWeight(FontWeight.Bold)
               .fontColor(Theme.brand())
@@ -1201,11 +1205,11 @@ export struct WeiboPostDetail {
           .alignContent(Alignment.Center)
         }
         Column({ space: 2 }) {
-          Text(currentPost.userName)
+          Text(params.post.userName)
             .fontSize(fs(16, this.fontScale))
             .fontWeight(FontWeight.Medium)
             .fontColor(Theme.textPrimary(this.isDark))
-          Text(`${currentPost.createdAt}${currentPost.source.length > 0 ? ' · ' + currentPost.source : ''}`)
+          Text(`${params.post.createdAt}${params.post.source.length > 0 ? ' · ' + params.post.source : ''}`)
             .fontSize(fs(12, this.fontScale))
             .fontColor(Theme.textSecondary(this.isDark))
             .maxLines(1)
@@ -1215,10 +1219,10 @@ export struct WeiboPostDetail {
       }
       .width('100%')
       .onClick((): void => {
-        this.openUserProfile(currentPost.userId, currentPost.userName);
+        this.openUserProfile(params.post.userId, params.post.userName);
       })
       WeiboRichTextView({
-        text: currentPost.text,
+        text: params.post.text,
         fontSize: fs(17, this.fontScale),
         lineHeight: fs(27, this.fontScale),
         fontColor: Theme.textPrimary(this.isDark),
@@ -1226,7 +1230,7 @@ export struct WeiboPostDetail {
         onMentionClick: (username: string): void => { this.openUserProfile('', username); }
       })
         .width('100%')
-      if (currentPost.isLongText) {
+      if (params.post.isLongText) {
         Row({ space: 4 }) {
           if (this.longTextLoading) {
             LoadingProgress()
@@ -1246,24 +1250,24 @@ export struct WeiboPostDetail {
         .enabled(!this.longTextLoading)
         .onClick((): void => { this.expandLongText(); })
       }
-      this.VideoPlayer(currentPost)
-      if (currentPost.pictures.length > 0) {
-        this.PictureGrid(currentPost.pictures, currentPost.pictureVideos ?? {})
+      this.VideoPlayer(params.post)
+      if (params.post.pictures.length > 0) {
+        this.PictureGrid(params.post.pictures, params.post.pictureVideos ?? {})
       }
-      if (currentPost.repost !== null) {
-        this.RepostCard(currentPost.repost)
+      if (params.post.repost !== null) {
+        this.RepostCard(params.post.repost)
       }
       Row({ space: Spacing.md }) {
-        Text(`转发 ${currentPost.repostCount}`)
+        Text(`转发 ${params.post.repostCount}`)
           .fontSize(fs(13, this.fontScale))
           .fontColor(Theme.textSecondary(this.isDark))
           .layoutWeight(1)
-        Text(`评论 ${currentPost.commentCount}`)
+        Text(`评论 ${params.post.commentCount}`)
           .fontSize(fs(13, this.fontScale))
           .fontColor(Theme.textSecondary(this.isDark))
           .layoutWeight(1)
           .textAlign(TextAlign.Center)
-        Text(`${currentPost.isLiked ? '♥' : '♡'} ${currentPost.likeCount}`)
+        Text(`${params.post.isLiked ? '♥' : '♡'} ${params.post.likeCount}`)
           .fontSize(fs(13, this.fontScale))
           .fontColor(Theme.brand())
           .layoutWeight(1)
@@ -1781,7 +1785,7 @@ export struct WeiboPostDetail {
             .margin({ top: 120 })
           } else if (this.post !== null) {
             Column() {
-              this.PostBody(this.post)
+              this.PostBody({ post: this.post })
               this.CommentsSection()
             }
             .width('100%')
