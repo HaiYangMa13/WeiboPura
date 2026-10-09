@@ -1724,7 +1724,8 @@ struct Index {
     .navBarWidth(480)
     .minContentWidth(360)
     .titleMode(HdsNavigationTitleMode.MINI)
-    .hideTitleBar(false)
+    // Discover owns its search field; an empty native title bar still intercepts its taps.
+    .hideTitleBar(this.privacyReady && this.privacyAccepted && this.selectedTab === WeiboTab.Discover)
     .hideBackButton(true)
     .bindToScrollable([
       this.homeRecommendScroller,
