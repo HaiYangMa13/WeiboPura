@@ -17,6 +17,7 @@ export interface WeiboUser {
   statusesCount: number;
   verified: boolean;
   verifiedReason: string;
+  following: boolean;
 }
 
 export interface WeiboPost {
@@ -25,17 +26,24 @@ export interface WeiboPost {
   userName: string;
   userAvatar: string;
   text: string;
+  /** True when the timeline only contains a shortened body that can be expanded. */
+  isLongText: boolean;
   pictures: string[];
+  /** Still-image URL -> server-provided LivePhoto video track. */
+  pictureVideos?: Record<string, string>;
   /** A directly playable MP4 stream supplied by the mobile status endpoint. */
   videoUrl: string;
   /** Poster image for the video stream; used while the player is preparing. */
   videoCoverUrl: string;
+  videoAspectRatio?: number;
   createdAt: string;
   source: string;
   likeCount: number;
   commentCount: number;
   repostCount: number;
   isLiked: boolean;
+  isFavorited?: boolean;
+  isFollowed?: boolean;
   repost: WeiboPost | null;
 }
 
@@ -54,6 +62,29 @@ export interface WeiboComment {
   text: string;
   createdAt: string;
   likeCount: number;
+  isLiked?: boolean;
+  replyCount?: number;
+  replies?: WeiboComment[];
+  pictures?: string[];
+}
+
+export interface WeiboNotification {
+  id: string;
+  senderId: string;
+  senderName: string;
+  senderAvatar: string;
+  type: 'mention' | 'comment' | 'like';
+  title: string;
+  content: string;
+  targetSnippet: string;
+  targetPostId: string;
+  createdAt: string;
+}
+
+/** Server comment order; new detail pages always start with Hot. */
+export enum WeiboCommentSort {
+  Hot = 0,
+  Latest = 1,
 }
 
 export interface WeiboCommentsPage {

@@ -18,6 +18,9 @@
 
 import { Theme, Spacing, Radius, isDarkMode, ImmBlur, ImmMaterial, fs } from '../common/Theme';
 import { ImageCache } from '../cache/ImageCache';
+import { Haptic } from '../common/Haptic';
+import { WeiboVideoPlayer } from './WeiboVideoPlayer';
+import { WeiboRichTextView } from './WeiboRichTextView';
 import { curves, display } from '@kit.ArkUI';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { hdsEffect } from '@kit.UIDesignKit';
@@ -71,12 +74,17 @@ export interface ThreadItemData {
   likeCount?: number;
   isLiked?: boolean;     // 是否已点赞
   abstract: string;
+  /** Optional original author shown before a forwarded social post body. */
+  repostAuthor?: string;
+  /** Uses content-first social typography instead of a forum thread headline. */
+  isSocialPost?: boolean;
   firstImage: string;
   images?: string[];
   /** Optional public MP4 stream. Empty for ordinary text/image posts. */
   videoUrl?: string;
   /** Poster shown by the native video player while a stream prepares. */
   videoCoverUrl?: string;
+  videoAspectRatio?: number;
   createTime: string;
   isTop: boolean;
   isGood?: boolean;
@@ -258,6 +266,8 @@ export struct ThreadCard {
     likeCount: 0,
     isLiked: false,
     abstract: '',
+    repostAuthor: '',
+    isSocialPost: false,
     firstImage: '',
     images: [],
     videoUrl: '',
@@ -267,6 +277,9 @@ export struct ThreadCard {
     isGood: false,
   };
   onTap: (tid: string) => void = () => {};
+  /** Optional nested-content action, used by Weibo cards to open the original repost. */
+  onAbstractTap: () => void = () => {};
+  @Prop abstractIsLink: boolean = false;
   onLike: (tid: string, postId: string, liked: boolean) => void = () => {};
   // 分享回调：由父组件(Index/ThreadList)注入实现，拉起鸿蒙系统分享面板
   onShare: (data: ThreadSharePayload) => void = () => {};
@@ -274,6 +287,8 @@ export struct ThreadCard {
   onComment: (tid: string) => void = () => {};
   // 头像点击回调：由父组件(Index/ThreadList)注入实现，跳转用户主页
   onAvatarTap: (authorId: string, author: string) => void = () => {};
+  onTopicTap: (topic: string) => void = () => {};
+  onMentionTap: (name: string) => void = () => {};
   /** Parent-owned image navigation; non-Weibo callers retain their existing behavior. */
   onImageTap: (urls: string[], index: number) => void = () => {};
   /**
@@ -528,7 +543,7 @@ export struct ThreadCard {
               .borderRadius(20)
               .objectFit(ImageFit.Cover)
               .clip(true)
-              .hitTestBehavior(HitTestMode.Block)
+              .hitTestBehavior(HitTestMode.Default)
               .onClick(() => {
                 this.onAvatarTap(this.getItem().authorId ?? '', this.getItem().author);
               })
@@ -544,7 +559,7 @@ export struct ThreadCard {
             .borderRadius(20)
             .backgroundColor(Theme.brand())
             .alignContent(Alignment.Center)
-            .hitTestBehavior(HitTestMode.Block)
+            .hitTestBehavior(HitTestMode.Default)
             .onClick(() => {
               this.onAvatarTap(this.getItem().authorId ?? '', this.getItem().author);
             })
@@ -556,9 +571,9 @@ export struct ThreadCard {
               .fontSize(fs(15, this.fontScale))
               .fontWeight(FontWeight.Medium)
               .fontColor(Theme.textPrimary(isDarkMode()))
-              .hitTestBehavior(HitTestMode.Block)
+              .hitTestBehavior(HitTestMode.Default)
               .onClick(() => {
-                // 点击作者名跳用户主页（Block 阻断冒泡，避免触发整卡跳详情）
+                // 点击作者名跳用户主页（Default 允许拖拽滚动手势穿透到外层滚动组件）
                 this.onAvatarTap(this.getItem().authorId ?? '', this.getItem().author);
               })
             Text(this.getItem().createTime)
@@ -571,25 +586,70 @@ export struct ThreadCard {
         .width('100%')
         .padding({ left: 16, right: 16, top: 16 })
 
-        // 标题
+        // 微博正文使用同一富文本解析器；论坛标题保持原样。
+        if (this.getItem().isSocialPost === true) {
+          WeiboRichTextView({ text: this.getItem().title, fontSize: fs(16, this.fontScale),
+            lineHeight: fs(24, this.fontScale), fontColor: Theme.textPrimary(isDarkMode()),
+            maxLines: this.cardColumns > 1 ? 3 : 6,
+            onTopicClick: (topic: string): void => { this.onTopicTap(topic); },
+            onMentionClick: (name: string): void => { this.onMentionTap(name); }
+          }).width('100%').padding({ left: 16, right: 16, top: 8 })
+        } else {
         Text(this.getItem().title)
-          .fontSize(fs(17, this.fontScale))
-          .fontWeight(FontWeight.Bold)
+          .fontSize(fs(this.getItem().isSocialPost === true ? 16 : 17, this.fontScale))
+          .fontWeight(this.getItem().isSocialPost === true ? FontWeight.Regular : FontWeight.Bold)
           .fontColor(Theme.textPrimary(isDarkMode()))
-          .maxLines(2)
+          .lineHeight(fs(this.getItem().isSocialPost === true ? 24 : 22, this.fontScale))
+          .maxLines(this.getItem().isSocialPost === true ? (this.cardColumns > 1 ? 3 : 6) : 2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .width('100%')
           .padding({ left: 16, right: 16, top: 8 })
+        }
 
         // 正文摘要：多列档降为 2 行（列窄、一屏要放下更多卡），单列逐像素维持现状 4 行
         if (this.getItem().abstract.length > 0) {
-          Text(this.getItem().abstract)
-            .fontSize(fs(14, this.fontScale))
-            .fontColor(Theme.textSecondary(isDarkMode()))
-            .maxLines(this.cardColumns > 1 ? 2 : 4)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .width('100%')
-            .padding({ left: 16, right: 16, top: 6 })
+          if (this.abstractIsLink) {
+            Row() {
+              if (this.getItem().isSocialPost === true) {
+                WeiboRichTextView({ text: `@${this.getItem().repostAuthor ?? ''}：${this.getItem().abstract}`,
+                  fontSize: fs(14, this.fontScale), lineHeight: fs(21, this.fontScale),
+                  fontColor: Theme.textPrimary(isDarkMode()), maxLines: this.cardColumns > 1 ? 3 : 6,
+                  onTopicClick: (topic: string): void => { this.onTopicTap(topic); },
+                  onMentionClick: (name: string): void => { this.onMentionTap(name); }
+                }).width('100%')
+              } else {
+              Text() {
+                if (this.getItem().repostAuthor !== undefined && this.getItem().repostAuthor!.length > 0) {
+                  Span(`@${this.getItem().repostAuthor!}：`)
+                    .fontWeight(FontWeight.Medium)
+                    .fontColor(Theme.brand())
+                }
+                Span(this.getItem().abstract)
+                  .fontColor(Theme.textPrimary(isDarkMode()))
+              }
+              .fontSize(fs(14, this.fontScale))
+              .lineHeight(fs(21, this.fontScale))
+              .maxLines(this.cardColumns > 1 ? 3 : 6)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .width('100%')
+              }
+            }
+            .padding({ left: 10, right: 10, top: 8, bottom: 8 })
+            .margin({ left: 16, right: 16, top: 6 })
+            .backgroundColor(isDarkMode() ? '#14FFFFFF' : '#06000000')
+            .borderRadius(Radius.md)
+            .hitTestBehavior(HitTestMode.Default)
+            .accessibilityText(`查看${this.getItem().repostAuthor ?? ''}的原微博`)
+            .onClick((): void => { this.onAbstractTap(); })
+          } else {
+            Text(this.getItem().abstract)
+              .fontSize(fs(14, this.fontScale))
+              .fontColor(Theme.textSecondary(isDarkMode()))
+              .maxLines(this.cardColumns > 1 ? 2 : 4)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .width('100%')
+              .padding({ left: 16, right: 16, top: 6 })
+          }
         }
 
         // 视频优先用系统 Video 播放器承载，避免将视频帖误当作静态封面图。
@@ -740,6 +800,7 @@ export struct ThreadCard {
           const targetPid = postId.length > 0 ? postId : '0';
           const liked = !this.getItem().isLiked;
           if (tid.length > 0) {
+            Haptic.light();
             this.onLike(tid, targetPid, liked);
           }
         })
@@ -808,45 +869,8 @@ export struct ThreadCard {
 
   @Builder
   VideoPlayer() {
-    Stack() {
-      Video({
-        src: this.getItem().videoUrl ?? '',
-        previewUri: this.getItem().videoCoverUrl ?? '',
-        controller: this.videoController
-      })
-        .width('100%')
-        .height(220)
-        .controls(true)
-        .autoPlay(false)
-        .loop(false)
-        .objectFit(ImageFit.Contain)
-        .backgroundColor(Color.Transparent)
-        .borderRadius(Radius.md)
-        .onError((): void => {
-          this.videoLoadFailed = true;
-        })
-      if (this.videoLoadFailed) {
-        Column({ space: 8 }) {
-          Text('视频暂时无法播放')
-            .fontSize(fs(13, this.fontScale))
-            .fontColor(Color.White)
-          Text('请稍后重试')
-            .fontSize(fs(12, this.fontScale))
-            .fontColor('#CCFFFFFF')
-        }
-        .width('100%')
-        .height(220)
-        .justifyContent(FlexAlign.Center)
-        .alignItems(HorizontalAlign.Center)
-        .backgroundColor('#99000000')
-        .borderRadius(Radius.md)
-      }
-    }
-    .width('100%')
-    .height(220)
-    .backgroundColor(Color.Black)
-    .borderRadius(Radius.md)
-    .clip(true)
+    WeiboVideoPlayer({ src: this.getItem().videoUrl ?? '', cover: this.getItem().videoCoverUrl ?? '',
+      videoRatio: this.getItem().videoAspectRatio ?? 16 / 9 })
   }
 
   @Builder
@@ -872,7 +896,7 @@ export struct ThreadCard {
       .padding(12)
       .backgroundColor(Theme.bgCard(isDarkMode()))
       .borderRadius(Radius.md)
-      .hitTestBehavior(HitTestMode.Block)
+      .hitTestBehavior(HitTestMode.Default)
       .onClick(() => {
         this.onTap(this.getItem().tid);
       })

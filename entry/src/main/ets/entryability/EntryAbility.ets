@@ -192,6 +192,7 @@ export default class EntryAbility extends UIAbility {
     try {
       mainWindow.off('windowSizeChange');
       mainWindow.off('avoidAreaChange');
+      mainWindow.off('keyboardHeightChange');
     } catch (error) {
       hilog.warn(0x0000, TAG, 'Unable to remove window listeners: %{public}s', JSON.stringify(error));
     }
@@ -222,7 +223,13 @@ export default class EntryAbility extends UIAbility {
         } else if (avoidAreaOption.type === window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR) {
           AppStorage.setOrCreate<number>(NAVIGATION_INDICATOR_HEIGHT_KEY,
             uiContext.px2vp(avoidAreaOption.area.bottomRect.height));
+        } else if (avoidAreaOption.type === window.AvoidAreaType.TYPE_KEYBOARD) {
+          AppStorage.setOrCreate<number>('keyboardHeight',
+            uiContext.px2vp(avoidAreaOption.area.bottomRect.height));
         }
+      });
+      mainWindow.on('keyboardHeightChange', (heightPx: number): void => {
+        AppStorage.setOrCreate<number>('keyboardHeight', uiContext.px2vp(heightPx));
       });
     } catch (error) {
       hilog.error(0x0000, TAG, 'Unable to observe window avoid areas: %{public}s', JSON.stringify(error));

@@ -5,6 +5,10 @@ import { ImmMaterial, Radius, Spacing, Theme, fs, isDarkMode } from '../common/T
 import { DividerShowType, HdsNavDestination, HdsNavDestinationTitleMode, ScrollEffectType, hdsMaterial } from '@kit.UIDesignKit';
 import { WeiboPostDetailRouteParam } from './WeiboPostDetail';
 import { syncWeiboSplitNavigation } from '../common/WeiboNavigationLayout';
+import { WeiboAuthManager } from '../service/WeiboAuthManager';
+import { Haptic } from '../common/Haptic';
+import { WeiboSearchResultRouteParam } from './WeiboSearchResult';
+import { withWeiboLike } from '../common/WeiboPostState';
 
 /** Explicit route input so profile navigation never depends on a card's transient state. */
 export interface WeiboUserProfileRouteParam {
@@ -27,6 +31,11 @@ export struct WeiboUserProfile {
   @State posts: WeiboPost[] = [];
   @State loading: boolean = true;
   @State errorMessage: string = '';
+  @State isFollowing: boolean = false;
+  @State followLoading: boolean = false;
+  @State likingIds: string[] = [];
+  private profileEpoch: number = 0;
+  @StorageLink('weiboAuthTick') @Watch('onWeiboAuthTick') weiboAuthTick: number = 0;
   @StorageLink('fontScale') fontScale: number = 1.0;
   /** Actual system top inset, populated by EntryAbility for each window. */
   @StorageLink('weibo.status_bar_height') statusBarHeight: number = 0;
@@ -48,6 +57,15 @@ export struct WeiboUserProfile {
     const routeParam: WeiboUserProfileRouteParam = params[params.length - 1];
     this.userId = typeof routeParam.userId === 'string' ? routeParam.userId.trim() : '';
     this.fallbackName = typeof routeParam.userName === 'string' ? routeParam.userName.trim() : '';
+    if (this.userId.length === 0 && this.fallbackName.length > 0) {
+      this.loading = true;
+      try {
+        const resolvedId: string = await WeiboService.getInstance().resolveUserIdByName(this.fallbackName);
+        if (resolvedId.length > 0) {
+          this.userId = resolvedId;
+        }
+      } catch (_e) {}
+    }
     if (this.userId.length === 0) {
       this.loading = false;
       this.errorMessage = '该用户资料暂不可用';
@@ -56,27 +74,47 @@ export struct WeiboUserProfile {
     await this.loadProfile();
   }
 
+  private onWeiboAuthTick(): void {
+    this.profileEpoch++;
+    this.profile = null;
+    this.posts = [];
+    this.isFollowing = false;
+    this.followLoading = false;
+    this.likingIds = [];
+    if (!WeiboAuthManager.getInstance().isSessionChanging()) { this.loadProfile(); }
+  }
+
   private async loadProfile(): Promise<void> {
     if (this.userId.length === 0) {
       return;
     }
+    const epoch: number = ++this.profileEpoch;
     this.loading = true;
     this.errorMessage = '';
     try {
       const service: WeiboService = WeiboService.getInstance();
-      this.profile = await service.fetchUserProfile(this.userId);
-      this.posts = await service.fetchUserTimeline(this.userId, 1);
+      const profile: WeiboUser = await service.fetchUserProfile(this.userId);
+      if (epoch !== this.profileEpoch) { return; }
+      const posts: WeiboPost[] = await service.fetchUserTimeline(this.userId, 1);
+      if (epoch !== this.profileEpoch) { return; }
+      this.profile = profile;
+      this.isFollowing = profile.following;
+      this.posts = posts;
     } catch (error) {
+      if (epoch !== this.profileEpoch) { return; }
       this.profile = null;
       this.posts = [];
       this.errorMessage = (error as Error).message ?? '用户资料加载失败，请稍后重试';
     } finally {
-      this.loading = false;
+      if (epoch === this.profileEpoch) { this.loading = false; }
     }
   }
 
   private toThreadCard(post: WeiboPost): ThreadItemData {
-    const firstImage: string = post.pictures.length > 0 ? post.pictures[0] : '';
+    const original: WeiboPost | null = post.repost;
+    const mediaPost: WeiboPost = (post.pictures.length > 0 || post.videoUrl.length > 0 || original === null)
+      ? post : original;
+    const firstImage: string = mediaPost.pictures.length > 0 ? mediaPost.pictures[0] : '';
     return {
       tid: post.id,
       postId: post.id,
@@ -90,11 +128,14 @@ export struct WeiboUserProfile {
       replyNum: post.commentCount,
       likeCount: post.likeCount,
       isLiked: post.isLiked,
-      abstract: post.repost === null ? '' : post.repost.text,
+      abstract: original === null ? '' : original.text,
+      repostAuthor: original === null ? '' : original.userName,
+      isSocialPost: true,
       firstImage: firstImage,
-      images: post.pictures,
-      videoUrl: post.videoUrl,
-      videoCoverUrl: post.videoCoverUrl,
+      images: mediaPost.pictures,
+      videoUrl: mediaPost.videoUrl,
+      videoCoverUrl: mediaPost.videoCoverUrl,
+      videoAspectRatio: mediaPost.videoAspectRatio,
       createTime: post.createdAt,
       isTop: false,
       isGood: false,
@@ -115,11 +156,74 @@ export struct WeiboUserProfile {
     syncWeiboSplitNavigation(this.weiboNavStack);
   }
 
-  private openImagePreview(urls: string[], index: number): void {
+  private openImagePreview(urls: string[], index: number, post: WeiboPost): void {
     if (urls.length === 0) {
       return;
     }
-    this.getUIContext().getRouter().pushUrl({ url: 'pages/ImagePreview', params: { urls: urls, index: index } });
+    this.getUIContext().getRouter().pushUrl({ url: 'pages/ImagePreview', params: { urls: urls, index: index, pictureVideos: (post.pictures.length > 0 ? post : post.repost)?.pictureVideos ?? {} } });
+  }
+
+  private async toggleFollow(): Promise<void> {
+    if (this.followLoading || this.userId.length === 0) {
+      return;
+    }
+    if (!WeiboAuthManager.getInstance().hasCookie()) {
+      this.getUIContext().getPromptAction().showToast({ message: '请先在“我的”页面登录微博' });
+      return;
+    }
+    const revision: number = WeiboAuthManager.getInstance().getSessionRevision();
+    this.followLoading = true;
+    try {
+      Haptic.light();
+      if (this.isFollowing) {
+        await WeiboService.getInstance().unfollowUser(this.userId);
+        WeiboAuthManager.getInstance().assertSession(revision);
+        this.isFollowing = false;
+        this.getUIContext().getPromptAction().showToast({ message: '已取消关注' });
+      } else {
+        await WeiboService.getInstance().followUser(this.userId);
+        WeiboAuthManager.getInstance().assertSession(revision);
+        this.isFollowing = true;
+        this.getUIContext().getPromptAction().showToast({ message: '已关注' });
+      }
+    } catch (e) {
+      if (revision !== WeiboAuthManager.getInstance().getSessionRevision()) { return; }
+      const msg: string = (e as Error).message ?? '关注操作失败';
+      this.getUIContext().getPromptAction().showToast({ message: msg });
+    } finally {
+      if (revision === WeiboAuthManager.getInstance().getSessionRevision()) { this.followLoading = false; }
+    }
+  }
+
+  private openTopic(topic: string): void {
+    const param: WeiboSearchResultRouteParam = { query: topic };
+    this.weiboNavStack.pushPath({ name: 'WeiboSearchResult', param: param });
+  }
+
+  private openMention(name: string, id: string = ''): void {
+    const param: WeiboUserProfileRouteParam = { userId: id, userName: name };
+    this.weiboNavStack.pushPath({ name: 'WeiboUserProfile', param: param });
+  }
+
+  private async togglePostLike(post: WeiboPost): Promise<void> {
+    if (this.likingIds.includes(post.id)) { return; }
+    const revision: number = WeiboAuthManager.getInstance().getSessionRevision();
+    this.likingIds = this.likingIds.concat([post.id]);
+    try {
+      await WeiboService.getInstance().setLike(post.id, !post.isLiked);
+      WeiboAuthManager.getInstance().assertSession(revision);
+      const updated: WeiboPost = withWeiboLike(post, !post.isLiked);
+      this.posts = this.posts.map((item: WeiboPost): WeiboPost => item.id === post.id ? updated : item);
+      Haptic.light();
+    } catch (error) {
+      if (revision === WeiboAuthManager.getInstance().getSessionRevision()) {
+        this.getUIContext().getPromptAction().showToast({ message: (error as Error).message ?? '点赞失败，请重试' });
+      }
+    } finally {
+      if (revision === WeiboAuthManager.getInstance().getSessionRevision()) {
+        this.likingIds = this.likingIds.filter((id: string): boolean => id !== post.id);
+      }
+    }
   }
 
   @Builder
@@ -135,7 +239,7 @@ export struct WeiboUserProfile {
         Stack() {
           SymbolGlyph($r('sys.symbol.person'))
             .fontSize(fs(36, this.fontScale))
-            .fontColor([$r('sys.color.icon_emphasize')])
+            .fontColor([Theme.brand()])
         }
         .width('100%')
         .height(100)
@@ -181,6 +285,32 @@ export struct WeiboUserProfile {
         }
         .layoutWeight(1)
         .alignItems(HorizontalAlign.Start)
+
+        Button() {
+          Row({ space: 4 }) {
+            if (this.followLoading) {
+              LoadingProgress()
+                .width(14)
+                .height(14)
+                .color(this.isFollowing ? Theme.textSecondary(this.isDark) : Color.White)
+            } else {
+              SymbolGlyph(this.isFollowing ? $r('sys.symbol.checkmark') : $r('sys.symbol.plus'))
+                .fontSize(fs(14, this.fontScale))
+                .fontColor([this.isFollowing ? Theme.textSecondary(this.isDark) : Color.White])
+            }
+            Text(this.isFollowing ? '已关注' : '关注')
+              .fontSize(fs(13, this.fontScale))
+              .fontWeight(FontWeight.Medium)
+              .fontColor(this.isFollowing ? Theme.textSecondary(this.isDark) : Color.White)
+          }
+        }
+        .height(32)
+        .padding({ left: 14, right: 14 })
+        .backgroundColor(this.isFollowing ? (this.isDark ? '#26FFFFFF' : '#14000000') : Theme.brand())
+        .borderRadius(Radius.full)
+        .onClick((): void => {
+          this.toggleFollow();
+        })
       }
       .width('100%')
       if (currentProfile.description.length > 0) {
@@ -252,9 +382,18 @@ export struct WeiboUserProfile {
               ThreadCard({
                 item: this.toThreadCard(post),
                 onTap: (_id: string): void => { this.openPost(post); },
+                onAbstractTap: (): void => {
+                  if (post.repost !== null) {
+                    this.openPost(post.repost);
+                  }
+                },
+                abstractIsLink: post.repost !== null,
                 onComment: (_id: string): void => { this.openPost(post); },
-                onAvatarTap: (_id: string, _name: string): void => { this.openPost(post); },
-                onImageTap: (urls: string[], index: number): void => { this.openImagePreview(urls, index); },
+                onAvatarTap: (id: string, name: string): void => { this.openMention(name, id); },
+                onTopicTap: (topic: string): void => { this.openTopic(topic); },
+                onMentionTap: (name: string): void => { this.openMention(name); },
+                onLike: (_id: string): void => { this.togglePostLike(post); },
+                onImageTap: (urls: string[], index: number): void => { this.openImagePreview(urls, index, post); },
                 skipImageCache: true
               })
             }, (post: WeiboPost): string => post.id)

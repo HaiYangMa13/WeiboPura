@@ -1,5 +1,6 @@
 import { common } from '@kit.AbilityKit';
 import { CacheManager } from '../cache/CacheManager';
+import { webview } from '@kit.ArkWeb';
 
 const COOKIE_KEY: string = 'weibo_readonly_cookie';
 const TARGET_USER_ID_KEY: string = 'weibo_target_user_id';
@@ -8,8 +9,13 @@ const TARGET_USER_ID_KEY: string = 'weibo_target_user_id';
 export class WeiboAuthManager {
   private static instance: WeiboAuthManager | null = null;
   private initialized: boolean = false;
+  private initializationTask: Promise<void> | null = null;
   private cookie: string = '';
   private targetUserId: string = '';
+  private sessionRevision: number = 0;
+  private clearing: boolean = false;
+  private cleanupRequired: boolean = false;
+  private persistenceTask: Promise<void> = Promise.resolve();
 
   static getInstance(): WeiboAuthManager {
     if (WeiboAuthManager.instance === null) {
@@ -22,10 +28,20 @@ export class WeiboAuthManager {
     if (this.initialized) {
       return;
     }
+    if (this.initializationTask === null) { this.initializationTask = this.loadStoredSession(context); }
+    await this.initializationTask;
+  }
+
+  private async loadStoredSession(context: common.UIAbilityContext): Promise<void> {
+    const revision: number = this.sessionRevision;
     const cache: CacheManager = CacheManager.getInstance();
     await cache.init(context);
-    this.cookie = (await cache.get(COOKIE_KEY)) ?? '';
-    this.targetUserId = (await cache.get(TARGET_USER_ID_KEY)) ?? '';
+    const cookie: string = (await cache.get(COOKIE_KEY)) ?? '';
+    const target: string = (await cache.get(TARGET_USER_ID_KEY)) ?? '';
+    if (revision === this.sessionRevision && !this.isSessionChanging()) {
+      this.cookie = cookie;
+      this.targetUserId = target;
+    }
     this.initialized = true;
   }
 
@@ -34,12 +50,35 @@ export class WeiboAuthManager {
   }
 
   hasCookie(): boolean {
-    return this.cookie.includes('SUB=');
+    return /(?:^|;\s*)SUB=[^;]+/.test(this.cookie);
   }
 
-  async setCookie(value: string): Promise<void> {
-    this.cookie = value.trim();
-    await CacheManager.getInstance().put(COOKIE_KEY, this.cookie);
+  getSessionRevision(): number { return this.sessionRevision; }
+
+  isSessionChanging(): boolean { return this.clearing || this.cleanupRequired; }
+
+  assertSession(revision: number): void {
+    if (this.isSessionChanging() || revision !== this.sessionRevision) {
+      throw new Error('账号会话已变更，请重新操作');
+    }
+  }
+
+  async setCookie(value: string, expectedRevision: number = this.sessionRevision): Promise<void> {
+    this.assertSession(expectedRevision);
+    const clean: string = value.trim();
+    if (!/(?:^|;\s*)SUB=[^;]+/.test(clean)) { throw new Error('未检测到有效微博登录 Cookie'); }
+    const task: Promise<void> = this.persistenceTask.catch((): void => {}).then(async (): Promise<void> => {
+      this.assertSession(expectedRevision);
+      await CacheManager.getInstance().putManyStrict({
+        'weibo_readonly_cookie': clean, 'weibo_target_user_id': ''
+      });
+      this.assertSession(expectedRevision);
+      this.cookie = clean;
+      this.targetUserId = '';
+      this.sessionRevision++;
+    });
+    this.persistenceTask = task;
+    await task;
   }
 
   getTargetUserId(): string {
@@ -47,7 +86,44 @@ export class WeiboAuthManager {
   }
 
   async setTargetUserId(value: string): Promise<void> {
-    this.targetUserId = value.trim();
-    await CacheManager.getInstance().put(TARGET_USER_ID_KEY, this.targetUserId);
+    const revision: number = this.sessionRevision;
+    const clean: string = value.trim();
+    const task: Promise<void> = this.persistenceTask.catch((): void => {}).then(async (): Promise<void> => {
+      this.assertSession(revision);
+      await CacheManager.getInstance().putManyStrict({ 'weibo_target_user_id': clean });
+      this.assertSession(revision);
+      this.targetUserId = clean;
+    });
+    this.persistenceTask = task;
+    await task;
+  }
+
+  async clearCookie(): Promise<void> {
+    // Revoke immediately, even if disk/Web cleanup fails. Serialize durable
+    // writes so an older login capture cannot persist after this logout.
+    this.cookie = '';
+    this.targetUserId = '';
+    this.sessionRevision++;
+    const revision: number = this.sessionRevision;
+    this.clearing = true;
+    this.cleanupRequired = true;
+    const task: Promise<void> = this.persistenceTask.catch((): void => {}).then(async (): Promise<void> => {
+      const failures: string[] = [];
+      try {
+        await CacheManager.getInstance().putManyStrict({
+          'weibo_readonly_cookie': '', 'weibo_target_user_id': ''
+        });
+      } catch (_error) { failures.push('本地登录存储清理失败'); }
+      try { await webview.WebCookieManager.clearAllCookies(); }
+      catch (_error) { failures.push('Web 登录 Cookie 清理失败'); }
+      try { webview.WebStorage.deleteAllData(); }
+      catch (_error) { failures.push('Web 登录存储清理失败'); }
+      if (failures.length > 0) { throw new Error(`${failures.join('；')}，请重试退出后再登录`); }
+    });
+    this.persistenceTask = task;
+    try {
+      await task;
+      if (revision === this.sessionRevision) { this.cleanupRequired = false; }
+    } finally { if (revision === this.sessionRevision) { this.clearing = false; } }
   }
 }
