@@ -6,7 +6,7 @@ export function withWeiboLike(source: WeiboPost, liked: boolean): WeiboPost {
     id: source.id, userId: source.userId, userName: source.userName, userAvatar: source.userAvatar,
     text: source.text, isLongText: source.isLongText, pictures: source.pictures, pictureVideos: source.pictureVideos,
     videoUrl: source.videoUrl, videoCoverUrl: source.videoCoverUrl, videoAspectRatio: source.videoAspectRatio,
-    isFavorited: source.isFavorited, createdAt: source.createdAt, source: source.source,
+    isFavorited: source.isFavorited, isFollowed: source.isFollowed, createdAt: source.createdAt, source: source.source,
     likeCount: source.isLiked === liked ? source.likeCount : Math.max(0, source.likeCount + (liked ? 1 : -1)),
     commentCount: source.commentCount, repostCount: source.repostCount, isLiked: liked, repost: source.repost
   };

@@ -498,7 +498,7 @@ export struct WeiboHomeTab {
       isLongText: post.isLongText,
       pictures: post.pictures,
       pictureVideos: post.pictureVideos,
-      isFavorited: post.isFavorited,
+      isFavorited: post.isFavorited, isFollowed: post.isFollowed,
       videoAspectRatio: post.videoAspectRatio,
       videoUrl: post.videoUrl,
       videoCoverUrl: post.videoCoverUrl,
@@ -1121,7 +1121,7 @@ export struct WeiboHomeTab {
           .padding({ left: 12, right: 12 })
         }
         .width('100%')
-      }, (post: WeiboPost): string => post.id)
+      }, (post: WeiboPost): string => `${post.id}:${post.isFollowed ?? false}`)
 
       ListItem() {
         this.WaterfallFooter()
@@ -1169,7 +1169,7 @@ export struct WeiboHomeTab {
       Column({ space: Spacing.md }) {
         ForEach(this.posts, (post: WeiboPost): void => {
           this.PostCard(post)
-        }, (post: WeiboPost): string => post.id)
+        }, (post: WeiboPost): string => `${post.id}:${post.isFollowed ?? false}`)
         if (this.hasMore) {
           this.LoadMoreButton()
         }

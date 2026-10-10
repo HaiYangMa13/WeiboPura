@@ -255,6 +255,17 @@ interface WeiboCommentJson {
   reply_comment?: WeiboCommentJson;
   pic?: WeiboPictureJson;
   pics?: WeiboPictureJson[];
+  url_struct?: WeiboCommentPictureGroup[];
+}
+
+/** Desktop comments attach photos to URL metadata rather than mobile pic/pics. */
+interface WeiboCommentPictureGroup {
+  pic_ids?: string[];
+  pic_infos?: Record<string, WeiboCommentPictureInfo>;
+}
+
+interface WeiboCommentPictureInfo extends WeiboPictureInfoJson {
+  woriginal?: WeiboPictureSizeJson;
 }
 
 /**
@@ -1230,7 +1241,8 @@ export class WeiboService {
   }
 
   private pushPictureUrl(pictures: string[], seen: Record<string, boolean>, url: string): void {
-    const clean: string = url.trim();
+    const trimmed: string = url.trim();
+    const clean: string = trimmed.startsWith('//') ? https: : trimmed;
     if (clean.length === 0 || seen[clean] === true) {
       return;
     }
@@ -1380,6 +1392,7 @@ export class WeiboService {
       repostCount: source.reposts_count ?? 0,
       isLiked: source.attitudes_status === 1,
       isFavorited: source.favorited ?? false,
+      isFollowed: author.following,
       repost: repostSource === undefined ? null : this.toPost(repostSource),
     };
   }
@@ -1393,11 +1406,27 @@ export class WeiboService {
       }
     }
     const pictures: string[] = [];
-    const imageSources: WeiboPictureJson[] = source.pics ?? (source.pic === undefined ? [] : [source.pic]);
+    const seen: Record<string, boolean> = {};
+    const imageSources: WeiboPictureJson[] = source.pics ?? [];
     for (const image of imageSources) {
-      const url: string = image.large?.url ?? image.url ?? '';
-      if (url.length > 0) {
-        pictures.push(url);
+      this.pushPictureUrl(pictures, seen, image.original?.url || image.largest?.url
+        || image.mw2000?.url || image.large?.url || image.url || '');
+    }
+    if (source.pic !== undefined) {
+      const image: WeiboPictureJson = source.pic;
+      this.pushPictureUrl(pictures, seen, image.original?.url || image.largest?.url
+        || image.mw2000?.url || image.large?.url || image.url || '');
+    }
+    for (const group of source.url_struct ?? []) {
+      const infos: Record<string, WeiboCommentPictureInfo> = group.pic_infos ?? {};
+      const orderedIds: string[] = group.pic_ids ?? [];
+      const ids: string[] = orderedIds.length > 0 ? orderedIds : Object.keys(infos);
+      for (const id of ids) {
+        const info: WeiboCommentPictureInfo | undefined = infos[id];
+        if (info === undefined) { continue; }
+        this.pushPictureUrl(pictures, seen, info.woriginal?.url || info.original?.url
+          || info.largest?.url || info.mw2000?.url || info.large?.url
+          || info.bmiddle?.url || info.thumbnail?.url || '');
       }
     }
     const rawId: string | number | undefined = source.idstr ?? source.id;

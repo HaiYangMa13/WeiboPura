@@ -75,6 +75,43 @@ function serviceHarness() {
     respond(value) { response = value; }, switchAccount() { revision++; cookie = 'SUB=account-b'; } };
 }
 const postFixture = { id: 123, idstr: '90071992547409931', text: '正文[微笑]', user: { idstr: '42', screen_name: '测试' } };
+
+test('post mapping carries actual author follow state, not timeline membership', () => {
+  const { service } = serviceHarness();
+  for (const following of [true, false]) {
+    const post = service.toPost({ ...postFixture, user: { ...postFixture.user, following },
+      retweeted_status: { ...postFixture, user: { ...postFixture.user, following: !following } } });
+    assert.equal(post.isFollowed, following);
+    assert.equal(post.repost.isFollowed, !following);
+    const liked = createLoader()('common/WeiboPostState').withWeiboLike(post, true);
+    assert.equal(liked.isFollowed, following);
+  }
+});
+
+test('desktop comment attachments preserve server ordering and full-size URLs', () => {
+  const { service } = serviceHarness();
+  const comment = service.toComment({ idstr: 'photo-comment', text: '[图片]', url_struct: [{
+    pic_ids: ['second', 'missing', 'first'], pic_infos: {
+      first: { large: { url: 'https://wx1.sinaimg.cn/large/first.jpg' } },
+      second: { woriginal: { url: '//wx1.sinaimg.cn/large/second.jpg' }, thumbnail: { url: 'thumb' } }
+    }
+  }] });
+  assert.deepEqual(Array.from(comment.pictures), [
+    'https://wx1.sinaimg.cn/large/second.jpg', 'https://wx1.sinaimg.cn/large/first.jpg'
+  ]);
+});
+
+test('comment photos merge mobile and desktop metadata without duplicates', () => {
+  const { service } = serviceHarness();
+  const url = 'https://wx1.sinaimg.cn/large/photo.jpg';
+  const comment = service.toComment({ pics: [], pic: { large: { url } }, url_struct: [
+    { pic_infos: { one: { woriginal: { url } } } }, {},
+    { pic_ids: [], pic_infos: { two: { woriginal: { url: '' }, bmiddle: { url: 'https://wx1.sinaimg.cn/bmiddle/other.jpg' } } } }
+  ], comments: [{ idstr: 'reply', url_struct: [{ pic_infos: { one: { original: { url } } } }] }] });
+  assert.deepEqual(Array.from(comment.pictures), [url, 'https://wx1.sinaimg.cn/bmiddle/other.jpg']);
+  assert.deepEqual(Array.from(comment.replies[0].pictures), [url]);
+  assert.equal(service.toComment({ text: 'plain comment', url_struct: [{}] }).pictures.length, 0);
+});
 test('publish uses documented update endpoint and comma-separated uploaded picId', async () => {
   const h = serviceHarness(); await h.service.publishPost(' hello ', ['p1', 'p2']);
   assert.equal(h.calls[0].url, 'https://m.weibo.cn/api/statuses/update');

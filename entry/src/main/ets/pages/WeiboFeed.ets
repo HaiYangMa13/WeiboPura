@@ -341,7 +341,7 @@ export struct WeiboFeed {
       isLongText: post.isLongText,
       pictures: post.pictures,
       pictureVideos: post.pictureVideos,
-      isFavorited: post.isFavorited,
+      isFavorited: post.isFavorited, isFollowed: post.isFollowed,
       videoAspectRatio: post.videoAspectRatio,
       videoUrl: post.videoUrl,
       videoCoverUrl: post.videoCoverUrl,

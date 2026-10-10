@@ -23,6 +23,8 @@ export struct WeiboVideoPlayer {
   @State failed: boolean = false;
   @State playing: boolean = false;
   @State showControls: boolean = true;
+  @State fullscreen: boolean = false;
+  private seeking: boolean = false;
   @State currentSeconds: number = 0;
   @State duration: number = 0;
   @State gestureHint: string = '';
@@ -46,6 +48,7 @@ export struct WeiboVideoPlayer {
 
   private scheduleControlsHide(): void {
     this.clearHideTimer();
+    if (this.fullscreen || this.seeking) { return; }
     if (!this.playing) {
       this.showControls = true;
       return;
@@ -82,6 +85,24 @@ export struct WeiboVideoPlayer {
     }
   }
 
+  private handleFullscreenChange(fullscreen: boolean): void {
+    this.fullscreen = fullscreen;
+    this.seeking = false;
+    this.showControls = true;
+    this.scheduleControlsHide();
+  }
+
+  private seekTo(value: number, mode: SliderChangeMode): void {
+    this.clearHideTimer();
+    this.seeking = true;
+    this.currentSeconds = value;
+    if (mode === SliderChangeMode.End || mode === SliderChangeMode.Click) {
+      this.controller.setCurrentTime(value, SeekMode.Accurate);
+      this.seeking = false;
+      this.scheduleControlsHide();
+    }
+  }
+
   private cycleRate(): void {
     const values: number[] = deviceInfo.sdkApiVersion >= 22 ? [0.75, 1, 1.25, 1.5, 2] : [0.75, 1, 1.25, 1.75, 2];
     const nextIndex: number = (values.indexOf(this.rate) + 1) % values.length;
@@ -101,7 +122,12 @@ export struct WeiboVideoPlayer {
       })
         .width('100%')
         .height('100%')
-        .controls(false)
+        // Native fullscreen moves only Video, not the sibling custom overlay.
+        // Enable its own controller there so seeking/play/pause/exit stay available.
+        .controls(this.fullscreen)
+        .onFullscreenChange((event): void => {
+          this.handleFullscreenChange(event.fullscreen);
+        })
         .autoPlay(false)
         .objectFit(ImageFit.Contain)
         .backgroundColor(Color.Black)
@@ -110,7 +136,7 @@ export struct WeiboVideoPlayer {
           this.failed = false;
         })
         .onUpdate((event): void => {
-          this.currentSeconds = event.time;
+          if (!this.seeking) { this.currentSeconds = event.time; }
         })
         .onStart((): void => {
           this.playing = true;
@@ -186,7 +212,7 @@ export struct WeiboVideoPlayer {
       }
 
       // Sleek official-grade bottom control bar overlay
-      if (this.showControls && !this.failed) {
+      if (this.showControls && !this.failed && !this.fullscreen) {
         Row({ space: 8 }) {
           // Play / Pause toggle
           Button() {
@@ -230,13 +256,7 @@ export struct WeiboVideoPlayer {
             .blockColor(Color.White)
             .trackThickness(3)
             .onChange((value: number, mode: SliderChangeMode): void => {
-              if (mode === SliderChangeMode.End || mode === SliderChangeMode.Click) {
-                this.controller.setCurrentTime(value, SeekMode.Accurate);
-                this.currentSeconds = value;
-                if (this.playing) {
-                  this.scheduleControlsHide();
-                }
-              }
+              this.seekTo(value, mode);
             })
 
           // Speed selector pill
@@ -267,6 +287,8 @@ export struct WeiboVideoPlayer {
           .borderRadius(15)
           .accessibilityText('视频全屏')
           .onClick((): void => {
+            this.fullscreen = true;
+            this.clearHideTimer();
             this.controller.requestFullscreen(true);
           })
         }
