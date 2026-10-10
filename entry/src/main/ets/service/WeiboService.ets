@@ -3,7 +3,7 @@ import { normalizeWeiboText, midToBid, bidToMid } from '../common/WeiboText';
 import { weiboLivePhotoTracks } from '../common/WeiboMediaMetadata';
 import { rcp } from '@kit.RemoteCommunicationKit';
 import { WeiboHttpClient } from '../network/WeiboHttpClient';
-import { WeiboComment, WeiboCommentSort, WeiboCommentsPage, WeiboHotTopic, WeiboNotification, WeiboPost, WeiboSuggestion, WeiboTimelinePage, WeiboUser } from '../model/WeiboModel';
+import { WeiboComment, WeiboCommentSort, WeiboCommentsPage, WeiboHotTopic, WeiboNotification, WeiboPost, WeiboSearchCompositeResult, WeiboSearchType, WeiboSuggestion, WeiboTimelinePage, WeiboUser } from '../model/WeiboModel';
 import { WeiboAuthManager } from './WeiboAuthManager';
 import { WeiboVisitorSession } from './WeiboVisitorSession';
 import { prepareWeiboImage, WeiboUploadImage } from './WeiboMedia';
@@ -81,6 +81,7 @@ interface WeiboCardJson {
   mblog?: WeiboPostJson;
   card_group?: WeiboCardJson[];
   user?: WeiboUserJson;
+  users?: WeiboUserJson[];
 }
 
 interface WeiboUserJson {
@@ -597,20 +598,67 @@ export class WeiboService {
   }
 
   /**
-   * Search posts through Weibo's mobile search container. It uses the same
-   * account-or-visitor session as the timeline, so public results work before
-   * login and a saved Cookie can return the user's normal search results.
+   * Search posts through Weibo's mobile search container with category filtering.
+   * Supports 综合 (type=1), 实时 (type=61), 视频 (type=64), 图片 (type=63).
    */
-  async fetchSearchPosts(query: string, page: number): Promise<WeiboPost[]> {
+  async fetchSearchPosts(query: string, page: number, type: number = 1): Promise<WeiboPost[]> {
     const cleanQuery: string = query.trim();
     if (cleanQuery.length === 0) {
       return [];
     }
     const safePage: number = page < 1 ? 1 : page;
-    const containerId: string = `100103type%3D1%26q%3D${encodeURIComponent(cleanQuery)}`;
+    const containerId: string = `100103type%3D${type}%26q%3D${encodeURIComponent(cleanQuery)}`;
     const raw: string = await this.get(
-      `https://m.weibo.cn/api/container/getIndex?containerid=${containerId}&page_type=searchall&page=${safePage}`);
+      `https://m.weibo.cn/api/container/getIndex?containerid=${containerId}&page_type=searchall&page=${safePage}`,
+      `https://m.weibo.cn/search?containerid=${containerId}`);
     return this.postsFromResponse(raw);
+  }
+
+  /**
+   * Search users through Weibo's mobile search container (type=3).
+   */
+  async fetchSearchUsers(query: string, page: number): Promise<WeiboUser[]> {
+    const cleanQuery: string = query.trim();
+    if (cleanQuery.length === 0) {
+      return [];
+    }
+    const safePage: number = page < 1 ? 1 : page;
+    const containerId: string = `100103type%3D3%26q%3D${encodeURIComponent(cleanQuery)}`;
+    const raw: string = await this.get(
+      `https://m.weibo.cn/api/container/getIndex?containerid=${containerId}&page_type=searchall&page=${safePage}`,
+      `https://m.weibo.cn/search?containerid=${containerId}`);
+    return this.usersFromResponse(raw);
+  }
+
+  /**
+   * Performs category-aware search returning posts, users, or highlight user cards.
+   */
+  async fetchSearchComposite(query: string, page: number, type: number = 1): Promise<WeiboSearchCompositeResult> {
+    const cleanQuery: string = query.trim();
+    if (cleanQuery.length === 0) {
+      return { posts: [], users: [], highlightUser: null, hasMore: false };
+    }
+    if (type === WeiboSearchType.User) {
+      const users: WeiboUser[] = await this.fetchSearchUsers(cleanQuery, page);
+      return { posts: [], users: users, highlightUser: null, hasMore: users.length > 0 };
+    }
+    const safePage: number = page < 1 ? 1 : page;
+    const containerId: string = `100103type%3D${type}%26q%3D${encodeURIComponent(cleanQuery)}`;
+    const raw: string = await this.get(
+      `https://m.weibo.cn/api/container/getIndex?containerid=${containerId}&page_type=searchall&page=${safePage}`,
+      `https://m.weibo.cn/search?containerid=${containerId}`);
+    const response: WeiboApiResponse = this.parseResponse(raw);
+    const cards: WeiboCardJson[] = response.data?.cards ?? [];
+    const posts: WeiboPost[] = [];
+    this.appendPostsFromCards(cards, posts);
+    const highlightUser: WeiboUser | null = (type === WeiboSearchType.All && page === 1)
+      ? this.extractHighlightUser(cards) : null;
+    return {
+      posts: posts,
+      users: [],
+      highlightUser: highlightUser,
+      hasMore: posts.length > 0
+    };
   }
 
   /**
@@ -804,17 +852,59 @@ export class WeiboService {
   }
 
   async fetchCommentReplies(commentId: string, maxId: string = '0'): Promise<WeiboCommentsPage> {
-    const raw: string = await this.get(`https://m.weibo.cn/comments/hotFlowChild?cid=${encodeURIComponent(commentId)}&max_id=${encodeURIComponent(maxId)}&max_id_type=0`);
-    const response: WeiboRepliesResponse = this.parseCommentResponse(raw);
-    if (response.ok === 0) {
-      throw new Error(response.msg ?? '回复加载失败');
+    const cid: string = commentId.trim();
+    if (cid.length === 0) {
+      return { items: [], nextMaxId: '0', hasMore: false };
     }
-    const items: WeiboComment[] = [];
-    for (const source of response.data ?? []) {
-      items.push(this.toComment(source));
+    const auth: WeiboAuthManager = WeiboAuthManager.getInstance();
+    const revision: number = auth.getSessionRevision();
+    const cookie: string = auth.getCookie() || WeiboVisitorSession.getInstance().getCookie();
+
+    // 1. Try mobile hotFlowChild with Referer
+    try {
+      const raw: string = await WeiboHttpClient.get(
+        `https://m.weibo.cn/comments/hotFlowChild?cid=${encodeURIComponent(cid)}&max_id=${encodeURIComponent(maxId)}&max_id_type=0`,
+        cookie,
+        `https://m.weibo.cn/detail/${encodeURIComponent(cid)}`
+      );
+      auth.assertSession(revision);
+      const trimmed: string = raw.trim();
+      if (!trimmed.startsWith('<!DOCTYPE') && !trimmed.startsWith('<html') && !trimmed.includes('passport.weibo.com')) {
+        const response: WeiboRepliesResponse = this.parseCommentResponse(raw);
+        if (response.ok === 1 && Array.isArray(response.data)) {
+          const items: WeiboComment[] = [];
+          for (const source of response.data) {
+            items.push(this.toComment(source));
+          }
+          const cursor: string = `${response.max_id ?? '0'}`;
+          return { items: items, nextMaxId: cursor, hasMore: cursor !== '0' && cursor !== maxId && items.length > 0 };
+        }
+      }
+    } catch (_mobileError) {
+      // Fall through to desktop endpoint
     }
-    const cursor: string = `${response.max_id ?? '0'}`;
-    return { items: items, nextMaxId: cursor, hasMore: cursor !== '0' && cursor !== maxId && items.length > 0 };
+
+    // 2. Desktop fallback (ajax/statuses/buildComments with fetch_level=1)
+    const isFirstPage: boolean = maxId === '0' || maxId.length === 0;
+    const desktopUrl: string = `https://weibo.com/ajax/statuses/buildComments?id=${encodeURIComponent(cid)}`
+      + `&is_reload=1&is_show_bulletin=2&is_mix=${isFirstPage ? 0 : 1}&fetch_level=1&max_id=${encodeURIComponent(maxId)}&count=20`;
+    const desktopRaw: string = await WeiboHttpClient.getDesktop(desktopUrl, cookie);
+    auth.assertSession(revision);
+    this.parseResponse(desktopRaw);
+    const desktopResponse: WeiboRepliesResponse = this.parseCommentResponse(desktopRaw);
+    if (!Array.isArray(desktopResponse.data)) {
+      throw new Error(desktopResponse.msg ?? '回复加载失败');
+    }
+    const desktopItems: WeiboComment[] = [];
+    for (const source of desktopResponse.data) {
+      desktopItems.push(this.toComment(source));
+    }
+    const nextCursor: string = `${desktopResponse.max_id ?? '0'}`;
+    return {
+      items: desktopItems,
+      nextMaxId: nextCursor,
+      hasMore: desktopItems.length > 0 && nextCursor !== '0' && nextCursor !== maxId
+    };
   }
 
   async fetchComments(postId: string, page: number, sort: WeiboCommentSort = WeiboCommentSort.Hot,
@@ -1083,6 +1173,55 @@ export class WeiboService {
     return raw;
   }
 
+  private usersFromResponse(raw: string): WeiboUser[] {
+    const response: WeiboApiResponse = this.parseResponse(raw);
+    const cards: WeiboCardJson[] = response.data?.cards ?? [];
+    const users: WeiboUser[] = [];
+    const seen: Record<string, boolean> = {};
+    this.appendUsersFromCards(cards, users, seen);
+    return users;
+  }
+
+  private appendUsersFromCards(cards: WeiboCardJson[], users: WeiboUser[], seen: Record<string, boolean>): void {
+    for (let index: number = 0; index < cards.length; index++) {
+      const card: WeiboCardJson = cards[index];
+      if (card.user !== undefined) {
+        const user: WeiboUser = this.toUser(card.user);
+        if (user.id.length > 0 && seen[user.id] !== true) {
+          seen[user.id] = true;
+          users.push(user);
+        }
+      }
+      if (Array.isArray(card.users)) {
+        for (let u: number = 0; u < card.users.length; u++) {
+          const user: WeiboUser = this.toUser(card.users[u]);
+          if (user.id.length > 0 && seen[user.id] !== true) {
+            seen[user.id] = true;
+            users.push(user);
+          }
+        }
+      }
+      if (card.card_group !== undefined) {
+        this.appendUsersFromCards(card.card_group, users, seen);
+      }
+    }
+  }
+
+  private extractHighlightUser(cards: WeiboCardJson[]): WeiboUser | null {
+    for (let index: number = 0; index < cards.length; index++) {
+      const card: WeiboCardJson = cards[index];
+      if (card.card_type === 10 || card.card_type === 11 || card.card_type === 12) {
+        if (card.user !== undefined) {
+          return this.toUser(card.user);
+        }
+        if (card.card_group !== undefined && card.card_group.length > 0 && card.card_group[0].user !== undefined) {
+          return this.toUser(card.card_group[0].user);
+        }
+      }
+    }
+    return null;
+  }
+
   private postsFromResponse(raw: string): WeiboPost[] {
     const response: WeiboApiResponse = this.parseResponse(raw);
     const cards: WeiboCardJson[] = response.data?.cards ?? [];
@@ -1242,7 +1381,7 @@ export class WeiboService {
 
   private pushPictureUrl(pictures: string[], seen: Record<string, boolean>, url: string): void {
     const trimmed: string = url.trim();
-    const clean: string = trimmed.startsWith('//') ? https: : trimmed;
+    const clean: string = trimmed.startsWith('//') ? `https:${trimmed}` : trimmed;
     if (clean.length === 0 || seen[clean] === true) {
       return;
     }

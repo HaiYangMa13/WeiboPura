@@ -1,4 +1,4 @@
-import { WeiboPost } from '../model/WeiboModel';
+import { WeiboPost, WeiboSearchCompositeResult, WeiboSearchType, WeiboUser } from '../model/WeiboModel';
 import { WeiboService } from '../service/WeiboService';
 import { WeiboAuthManager } from '../service/WeiboAuthManager';
 import { withWeiboLike } from '../common/WeiboPostState';
@@ -26,6 +26,17 @@ export struct WeiboSearchResult {
   @State query: string = '';
   @State searchInput: string = '';
   @State posts: WeiboPost[] = [];
+  @State users: WeiboUser[] = [];
+  @State highlightUser: WeiboUser | null = null;
+  @State currentTab: number = 0;
+  private readonly tabs: string[] = ['综合', '实时', '用户', '视频', '图片'];
+  private readonly tabTypes: WeiboSearchType[] = [
+    WeiboSearchType.All,
+    WeiboSearchType.Realtime,
+    WeiboSearchType.User,
+    WeiboSearchType.Video,
+    WeiboSearchType.Image
+  ];
   @State loading: boolean = true;
   @State isRefreshing: boolean = false;
   @State isLoadingMore: boolean = false;
@@ -65,10 +76,60 @@ export struct WeiboSearchResult {
   private onWeiboAuthTick(): void {
     this.searchEpoch++;
     this.posts = [];
+    this.users = [];
+    this.highlightUser = null;
     this.likingIds = [];
     this.isLoadingMore = false;
     this.isRefreshing = false;
     if (!WeiboAuthManager.getInstance().isSessionChanging() && this.query.length > 0) { this.executeSearch(this.query, 1, false); }
+  }
+
+  private switchTab(index: number): void {
+    if (this.currentTab === index) {
+      return;
+    }
+    this.currentTab = index;
+    Haptic.light();
+    this.posts = [];
+    this.users = [];
+    this.highlightUser = null;
+    this.currentPage = 1;
+    this.hasMore = true;
+    this.errorMessage = '';
+    this.moreError = '';
+    if (this.query.length > 0) {
+      this.executeSearch(this.query, 1, false);
+    }
+  }
+
+  private isContentEmpty(): boolean {
+    if (this.currentTab === 2) {
+      return this.users.length === 0;
+    }
+    return this.posts.length === 0 && this.highlightUser === null;
+  }
+
+  private async toggleFollowUser(user: WeiboUser): Promise<void> {
+    const nextFollowed: boolean = !user.following;
+    try {
+      Haptic.light();
+      if (nextFollowed) {
+        await WeiboService.getInstance().followUser(user.id);
+      } else {
+        await WeiboService.getInstance().unfollowUser(user.id);
+      }
+      user.following = nextFollowed;
+      this.users = this.users.slice();
+      if (this.highlightUser !== null && this.highlightUser.id === user.id) {
+        this.highlightUser.following = nextFollowed;
+      }
+      this.getUIContext().getPromptAction().showToast({
+        message: nextFollowed ? `已关注 @${user.screenName}` : `已取消关注 @${user.screenName}`
+      });
+    } catch (error) {
+      const msg: string = (error as Error).message ?? '关注操作未完成';
+      this.getUIContext().getPromptAction().showToast({ message: msg });
+    }
   }
 
   private async executeSearch(query: string, page: number, isRefresh: boolean): Promise<void> {
@@ -86,28 +147,56 @@ export struct WeiboSearchResult {
       this.isLoadingMore = true;
     }
 
+    const type: WeiboSearchType = this.tabTypes[this.currentTab] ?? WeiboSearchType.All;
+
     try {
-      const results: WeiboPost[] = await WeiboService.getInstance().fetchSearchPosts(query, page);
-      if (epoch !== this.searchEpoch) { return; }
-      if (page === 1) {
-        this.posts = results;
-        this.currentPage = 1;
-        this.hasMore = results.length > 0;
-      } else {
-        const added: WeiboPost[] = results.filter((item: WeiboPost): boolean => !this.posts.some((old: WeiboPost): boolean => old.id === item.id));
-        if (added.length > 0) {
-          this.posts = this.posts.concat(added);
-          this.currentPage = page;
+      if (type === WeiboSearchType.User) {
+        const results: WeiboUser[] = await WeiboService.getInstance().fetchSearchUsers(query, page);
+        if (epoch !== this.searchEpoch) { return; }
+        if (page === 1) {
+          this.users = results;
+          this.currentPage = 1;
+          this.hasMore = results.length > 0;
         } else {
-          this.hasMore = false;
+          const added: WeiboUser[] = results.filter((item: WeiboUser): boolean =>
+            !this.users.some((old: WeiboUser): boolean => old.id === item.id));
+          if (added.length > 0) {
+            this.users = this.users.concat(added);
+            this.currentPage = page;
+          } else {
+            this.hasMore = false;
+          }
+        }
+      } else {
+        const composite: WeiboSearchCompositeResult =
+          await WeiboService.getInstance().fetchSearchComposite(query, page, type);
+        if (epoch !== this.searchEpoch) { return; }
+        if (page === 1) {
+          this.posts = composite.posts;
+          this.highlightUser = composite.highlightUser;
+          this.currentPage = 1;
+          this.hasMore = composite.hasMore;
+        } else {
+          const added: WeiboPost[] = composite.posts.filter((item: WeiboPost): boolean =>
+            !this.posts.some((old: WeiboPost): boolean => old.id === item.id));
+          if (added.length > 0) {
+            this.posts = this.posts.concat(added);
+            this.currentPage = page;
+          } else {
+            this.hasMore = false;
+          }
         }
       }
     } catch (error) {
       if (epoch !== this.searchEpoch) { return; }
       if (page === 1) {
         this.posts = [];
+        this.users = [];
+        this.highlightUser = null;
         this.errorMessage = (error as Error).message ?? '微博搜索加载失败，请稍后重试';
-      } else { this.moreError = (error as Error).message ?? '加载下一页失败，请重试'; }
+      } else {
+        this.moreError = (error as Error).message ?? '加载下一页失败，请重试';
+      }
     } finally {
       if (epoch === this.searchEpoch) {
         this.loading = false;
@@ -243,63 +332,278 @@ export struct WeiboSearchResult {
   }
 
   @Builder
-  SearchTitleBar() {
-    Row({ space: Spacing.sm }) {
-      Button() {
-        SymbolGlyph($r('sys.symbol.chevron_left'))
-          .fontSize(fs(28, this.fontScale))
-          .fontColor([$r('sys.color.icon_primary')])
+  HighlightUserCard(user: WeiboUser) {
+    Row({ space: Spacing.md }) {
+      Stack({ alignContent: Alignment.BottomEnd }) {
+        if (user.avatarUrl.length > 0) {
+          Image(user.avatarUrl)
+            .width(44)
+            .height(44)
+            .borderRadius(Radius.full)
+            .objectFit(ImageFit.Cover)
+            .backgroundColor(Theme.bgSubCard(this.isDark))
+        } else {
+          Stack() {
+            Text(user.screenName.length > 0 ? user.screenName.substring(0, 1) : '微')
+              .fontSize(fs(18, this.fontScale))
+              .fontWeight(FontWeight.Bold)
+              .fontColor(Color.White)
+          }
+          .width(44)
+          .height(44)
+          .borderRadius(Radius.full)
+          .backgroundColor(Theme.brand())
+          .alignContent(Alignment.Center)
+        }
+        if (user.verified) {
+          Text('V')
+            .fontSize(8)
+            .fontWeight(FontWeight.Bolder)
+            .fontColor(Color.White)
+            .backgroundColor(user.verifiedReason.includes('官方') ? '#3880E8' : '#E8A838')
+            .borderRadius(Radius.full)
+            .width(13)
+            .height(13)
+            .textAlign(TextAlign.Center)
+            .border({ width: 1.5, color: Theme.bgCard(this.isDark) })
+            .offset({ x: 2, y: 2 })
+        }
       }
       .width(44)
       .height(44)
-      .backgroundColor(Color.Transparent)
-      .systemMaterial(ImmMaterial.control())
-      .borderRadius(Radius.full)
-      .accessibilityText($r('app.string.weibo_back'))
-      .onClick((): void => { this.popRoute(); })
 
-      Search({
-        value: this.searchInput,
-        placeholder: $r('app.string.weibo_search_placeholder')
-      })
-        .layoutWeight(1)
-        .height(38)
-        .backgroundColor(Color.Transparent)
-        .fontColor(Theme.textPrimary(this.isDark))
-        .systemMaterial(ImmMaterial.seg(false))
+      Column({ space: 2 }) {
+        Row({ space: Spacing.xs }) {
+          Text(user.screenName)
+            .fontSize(fs(14, this.fontScale))
+            .fontWeight(FontWeight.Bold)
+            .fontColor(Theme.textPrimary(this.isDark))
+          if (user.verifiedReason.length > 0) {
+            Text(user.verifiedReason)
+              .fontSize(fs(11, this.fontScale))
+              .fontColor(user.verifiedReason.includes('官方') ? '#7BA8FF' : '#E8A838')
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+        }
+        .width('100%')
+
+        if (user.followersCount.length > 0 || user.statusesCount > 0) {
+          Text(`粉丝 ${user.followersCount}${user.statusesCount > 0 ? ` · 微博 ${user.statusesCount}` : ''}`)
+            .fontSize(fs(11, this.fontScale))
+            .fontColor(Theme.textTertiary(this.isDark))
+        }
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+
+      Button(user.following ? '已关注' : '+ 关注')
+        .height(28)
+        .fontSize(fs(11.5, this.fontScale))
+        .fontWeight(user.following ? FontWeight.Normal : FontWeight.Bold)
+        .fontColor(user.following ? Theme.textSecondary(this.isDark) : Color.White)
+        .backgroundColor(user.following ? Theme.bgSubCard(this.isDark) : Theme.brand())
         .borderRadius(Radius.full)
-        .clip(true)
-        .onChange((value: string): void => {
-          this.searchInput = value;
+        .padding({ left: 10, right: 10 })
+        .onClick((): void => {
+          this.toggleFollowUser(user);
         })
-        .onSubmit((value: string): void => {
-          const trimmed: string = value.trim();
+    }
+    .width('100%')
+    .padding(Spacing.md)
+    .backgroundColor(Theme.bgCard(this.isDark))
+    .borderRadius(Radius.lg)
+    .border({ width: 0.5, color: Theme.cardBorder(this.isDark) })
+    .onClick((): void => {
+      this.openUserProfile(user.id, user.screenName);
+    })
+  }
+
+  @Builder
+  UserListItem(user: WeiboUser) {
+    Row({ space: Spacing.md }) {
+      Stack({ alignContent: Alignment.BottomEnd }) {
+        if (user.avatarUrl.length > 0) {
+          Image(user.avatarUrl)
+            .width(48)
+            .height(48)
+            .borderRadius(Radius.full)
+            .objectFit(ImageFit.Cover)
+            .backgroundColor(Theme.bgSubCard(this.isDark))
+        } else {
+          Stack() {
+            Text(user.screenName.length > 0 ? user.screenName.substring(0, 1) : '微')
+              .fontSize(fs(20, this.fontScale))
+              .fontWeight(FontWeight.Bold)
+              .fontColor(Color.White)
+          }
+          .width(48)
+          .height(48)
+          .borderRadius(Radius.full)
+          .backgroundColor(Theme.brand())
+          .alignContent(Alignment.Center)
+        }
+        if (user.verified) {
+          Text('V')
+            .fontSize(9)
+            .fontWeight(FontWeight.Bolder)
+            .fontColor(Color.White)
+            .backgroundColor(user.verifiedReason.includes('官方') ? '#3880E8' : '#E8A838')
+            .borderRadius(Radius.full)
+            .width(14)
+            .height(14)
+            .textAlign(TextAlign.Center)
+            .border({ width: 1.5, color: Theme.bgCard(this.isDark) })
+            .offset({ x: 2, y: 2 })
+        }
+      }
+      .width(48)
+      .height(48)
+
+      Column({ space: 3 }) {
+        Row({ space: Spacing.xs }) {
+          Text(user.screenName)
+            .fontSize(fs(14.5, this.fontScale))
+            .fontWeight(FontWeight.Bold)
+            .fontColor(Theme.textPrimary(this.isDark))
+          if (user.verifiedReason.length > 0) {
+            Text(user.verifiedReason)
+              .fontSize(fs(11, this.fontScale))
+              .fontColor(user.verifiedReason.includes('官方') ? '#7BA8FF' : '#E8A838')
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+          }
+        }
+        .width('100%')
+
+        if (user.description.length > 0) {
+          Text(user.description)
+            .fontSize(fs(12, this.fontScale))
+            .fontColor(Theme.textSecondary(this.isDark))
+            .maxLines(2)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+        }
+
+        Row({ space: Spacing.md }) {
+          if (user.followersCount.length > 0) {
+            Text(`粉丝 ${user.followersCount}`)
+              .fontSize(fs(11, this.fontScale))
+              .fontColor(Theme.textTertiary(this.isDark))
+          }
+          if (user.statusesCount > 0) {
+            Text(`微博 ${user.statusesCount}`)
+              .fontSize(fs(11, this.fontScale))
+              .fontColor(Theme.textTertiary(this.isDark))
+          }
+        }
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+
+      Button(user.following ? '已关注' : '+ 关注')
+        .height(30)
+        .fontSize(fs(12, this.fontScale))
+        .fontWeight(user.following ? FontWeight.Normal : FontWeight.Bold)
+        .fontColor(user.following ? Theme.textSecondary(this.isDark) : Color.White)
+        .backgroundColor(user.following ? Theme.bgSubCard(this.isDark) : Theme.brand())
+        .borderRadius(Radius.full)
+        .padding({ left: 12, right: 12 })
+        .onClick((): void => {
+          this.toggleFollowUser(user);
+        })
+    }
+    .width('100%')
+    .padding(Spacing.md)
+    .backgroundColor(Theme.bgCard(this.isDark))
+    .borderRadius(Radius.lg)
+    .border({ width: 0.5, color: Theme.cardBorder(this.isDark) })
+    .onClick((): void => {
+      this.openUserProfile(user.id, user.screenName);
+    })
+  }
+
+  @Builder
+  SearchTitleBar() {
+    Column() {
+      Row({ space: Spacing.sm }) {
+        Button() {
+          SymbolGlyph($r('sys.symbol.chevron_left'))
+            .fontSize(fs(28, this.fontScale))
+            .fontColor([$r('sys.color.icon_primary')])
+        }
+        .width(44)
+        .height(44)
+        .backgroundColor(Color.Transparent)
+        .systemMaterial(ImmMaterial.control())
+        .borderRadius(Radius.full)
+        .accessibilityText($r('app.string.weibo_back'))
+        .onClick((): void => { this.popRoute(); })
+
+        Search({
+          value: this.searchInput,
+          placeholder: $r('app.string.weibo_search_placeholder')
+        })
+          .layoutWeight(1)
+          .height(38)
+          .backgroundColor(Color.Transparent)
+          .fontColor(Theme.textPrimary(this.isDark))
+          .systemMaterial(ImmMaterial.seg(false))
+          .borderRadius(Radius.full)
+          .clip(true)
+          .onChange((value: string): void => {
+            this.searchInput = value;
+          })
+          .onSubmit((value: string): void => {
+            const trimmed: string = value.trim();
+            if (trimmed.length > 0) {
+              this.query = trimmed;
+              this.executeSearch(trimmed, 1, false);
+            }
+          })
+
+        Button() {
+          SymbolGlyph($r('sys.symbol.magnifyingglass'))
+            .fontSize(fs(20, this.fontScale))
+            .fontColor([Theme.brand()])
+        }
+        .width(40)
+        .height(40)
+        .backgroundColor(Color.Transparent)
+        .borderRadius(Radius.full)
+        .onClick((): void => {
+          const trimmed: string = this.searchInput.trim();
           if (trimmed.length > 0) {
             this.query = trimmed;
             this.executeSearch(trimmed, 1, false);
           }
         })
-
-      Button() {
-        SymbolGlyph($r('sys.symbol.magnifyingglass'))
-          .fontSize(fs(20, this.fontScale))
-          .fontColor([Theme.brand()])
       }
-      .width(40)
-      .height(40)
-      .backgroundColor(Color.Transparent)
-      .borderRadius(Radius.full)
-      .onClick((): void => {
-        const trimmed: string = this.searchInput.trim();
-        if (trimmed.length > 0) {
-          this.query = trimmed;
-          this.executeSearch(trimmed, 1, false);
+      .width('100%')
+      .height(56)
+      .padding({ left: Spacing.sm, right: Spacing.md })
+
+      Scroll() {
+        Row({ space: Spacing.xs }) {
+          ForEach(this.tabs, (tab: string, index: number): void => {
+            Button(tab)
+              .height(28)
+              .padding({ left: 12, right: 12 })
+              .fontSize(fs(12.5, this.fontScale))
+              .fontColor(this.currentTab === index ? Color.White : Theme.textSecondary(this.isDark))
+              .fontWeight(this.currentTab === index ? FontWeight.Medium : FontWeight.Normal)
+              .backgroundColor(this.currentTab === index ? Theme.brand() : Color.Transparent)
+              .borderRadius(Radius.full)
+              .onClick((): void => {
+                this.switchTab(index);
+              })
+          }, (tab: string): string => tab)
         }
-      })
+        .padding({ left: Spacing.sm, right: Spacing.sm, bottom: 6 })
+      }
+      .scrollable(ScrollDirection.Horizontal)
+      .scrollBar(BarState.Off)
+      .width('100%')
     }
-    .width('100%')
-    .height(64)
-    .padding({ left: Spacing.sm, right: Spacing.md })
   }
 
   @Builder
@@ -316,26 +620,46 @@ export struct WeiboSearchResult {
               onRetry: (): void => { this.executeSearch(this.query, 1, false); }
             })
               .height(360)
-          } else if (this.posts.length === 0) {
+          } else if (this.isContentEmpty()) {
             EmptyView({ message: $r('app.string.weibo_search_empty'), icon: '⌕' })
               .height(360)
           } else {
-            ForEach(this.posts, (post: WeiboPost): void => {
-              ThreadCard({
-                item: this.toThreadCard(post),
-                onTap: (_id: string): void => { this.openPost(post); },
-                onAbstractTap: (): void => { this.openOriginalPost(post); },
-                abstractIsLink: post.repost !== null,
-                onComment: (_id: string): void => { this.openPost(post); },
-                onAvatarTap: (id: string, name: string): void => { this.openUserProfile(id, name); },
-                onTopicTap: (topic: string): void => { this.openTopic(topic); },
-                onMentionTap: (name: string): void => { this.openUserProfile('', name); },
-                onLike: (_id: string): void => { this.togglePostLike(post); },
-                onImageTap: (urls: string[], index: number): void => { this.openImagePreview(urls, index, post); },
-                onShare: (payload: ThreadSharePayload): void => { this.onShare(payload); },
-                skipImageCache: true,
-              })
-            }, (post: WeiboPost): string => post.id)
+            if (this.currentTab === 1) {
+              Row() {
+                Text('按发布时间倒序排列')
+                  .fontSize(fs(11, this.fontScale))
+                  .fontColor(Theme.textTertiary(this.isDark))
+              }
+              .width('100%')
+              .padding({ left: 4, bottom: 2 })
+            }
+
+            if (this.currentTab === 0 && this.highlightUser !== null) {
+              this.HighlightUserCard(this.highlightUser)
+            }
+
+            if (this.currentTab === 2) {
+              ForEach(this.users, (user: WeiboUser): void => {
+                this.UserListItem(user)
+              }, (user: WeiboUser): string => `${user.id}:${user.following}`)
+            } else {
+              ForEach(this.posts, (post: WeiboPost): void => {
+                ThreadCard({
+                  item: this.toThreadCard(post),
+                  onTap: (_id: string): void => { this.openPost(post); },
+                  onAbstractTap: (): void => { this.openOriginalPost(post); },
+                  abstractIsLink: post.repost !== null,
+                  onComment: (_id: string): void => { this.openPost(post); },
+                  onAvatarTap: (id: string, name: string): void => { this.openUserProfile(id, name); },
+                  onTopicTap: (topic: string): void => { this.openTopic(topic); },
+                  onMentionTap: (name: string): void => { this.openUserProfile('', name); },
+                  onLike: (_id: string): void => { this.togglePostLike(post); },
+                  onImageTap: (urls: string[], index: number): void => { this.openImagePreview(urls, index, post); },
+                  onShare: (payload: ThreadSharePayload): void => { this.onShare(payload); },
+                  skipImageCache: true,
+                })
+              }, (post: WeiboPost): string => post.id)
+            }
 
             if (this.moreError.length > 0) {
               Text(this.moreError).fontSize(fs(13, this.fontScale)).fontColor(Theme.danger())
@@ -351,7 +675,7 @@ export struct WeiboSearchResult {
               .width('100%')
               .justifyContent(FlexAlign.Center)
               .padding({ top: Spacing.md, bottom: Spacing.md })
-            } else if (!this.hasMore && this.posts.length > 0) {
+            } else if (!this.hasMore && !this.isContentEmpty()) {
               Text('已加载全部内容')
                 .width('100%')
                 .fontSize(fs(12, this.fontScale))
@@ -365,7 +689,7 @@ export struct WeiboSearchResult {
         .padding({
           left: Spacing.lg,
           right: Spacing.lg,
-          top: this.statusBarHeight + 64,
+          top: this.statusBarHeight + 100,
           bottom: Spacing.xl
         })
       }

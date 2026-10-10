@@ -93,6 +93,22 @@ export interface WeiboCommentsPage {
   hasMore: boolean;
 }
 
+/** Search categories corresponding to Weibo mobile container types. */
+export enum WeiboSearchType {
+  All = 1,
+  Realtime = 61,
+  User = 3,
+  Video = 64,
+  Image = 63,
+}
+
+export interface WeiboSearchCompositeResult {
+  posts: WeiboPost[];
+  users: WeiboUser[];
+  highlightUser: WeiboUser | null;
+  hasMore: boolean;
+}
+
 /** A real-time entry from the public Weibo hot-search board. */
 export interface WeiboHotTopic {
   rank: number;
