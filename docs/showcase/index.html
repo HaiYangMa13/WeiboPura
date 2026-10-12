@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Fluo · 界面预览</title>
+  <link rel="stylesheet" href="showcase.css">
+  <script src="showcase.js" defer></script>
+</head>
+<body>
+  <header class="toolbar">
+    <a class="wordmark" href="../../README.md" aria-label="查看 Fluo 项目介绍"><img src="app-icon.png" alt="" width="36" height="36">Fluo<span>界面预览</span></a>
+    <nav aria-label="展示场景"><a href="#home">首页</a><a href="#search">搜索</a><a href="#detail">详情</a></nav>
+    <button id="theme-toggle" class="theme-toggle" type="button" aria-pressed="false">切换深色</button>
+  </header>
+  <main>
+    <div class="overview-heading"><div><span class="eyebrow">FLUO / HARMONYOS</span><h1>首页、搜索和讨论。</h1></div><p>HTML 界面示意 · 非实机截图<br>虚构账号与示例内容，实际界面以应用为准。</p></div>
+    <section class="stage" id="home" aria-labelledby="home-heading">
+      <div class="copy">
+        <div class="eyebrow"><span class="brand-dot"></span> FLUO / HARMONYOS</div>
+        <div class="section-no">01 — 首页</div>
+        <h1 id="home-heading">看看关注，<br>也看看推荐。</h1>
+        <p class="lead">熟悉的人，新鲜的事。<br>图文、视频和讨论，都在信息流里。</p>
+        <div class="feature-tags"><span>关注 / 推荐</span><span>图片预览</span><span>热门评论</span></div>
+        <div class="scene-line"><span>原生微博客户端</span><span>ArkTS / ArkUI</span></div>
+        <p class="disclosure">HTML 界面示意 · 非实机截图<br>使用虚构账号与示例内容，实际界面以应用为准。</p>
+      </div>
+      <div class="device-zone"><div class="device"><div class="screen" id="home-screen"></div></div><div class="device-caption">首页 · 浅色与深色主题</div></div>
+    </section>
+    <section class="stage" id="search" aria-labelledby="search-heading">
+      <div class="copy">
+        <div class="eyebrow"><span class="brand-dot"></span> FLUO / HARMONYOS</div>
+        <div class="section-no">02 — 搜索</div>
+        <h2 id="search-heading">搜一个词，<br>换个角度看。</h2>
+        <p class="lead">找人、看实时动态，或只看图片。<br>结果按分类整理，不必从头翻起。</p>
+        <div class="feature-tags"><span>五种分类</span><span>用户与话题建议</span><span>搜索历史</span></div>
+        <div class="scene-line"><span>点击右侧分类试一试</span><span>综合 / 实时 / 用户 / 视频 / 图片</span></div>
+        <p class="disclosure">HTML 界面示意 · 非实机截图<br>分类交互仅用于演示，不访问微博服务。</p>
+      </div>
+      <div class="device-zone"><div class="device"><div class="screen" id="search-screen"></div></div><div class="device-caption">搜索 · 分类切换</div></div>
+    </section>
+    <section class="stage" id="detail" aria-labelledby="detail-heading">
+      <div class="copy">
+        <div class="eyebrow"><span class="brand-dot"></span> FLUO / HARMONYOS</div>
+        <div class="section-no">03 — 正文与讨论</div>
+        <h2 id="detail-heading">读完正文，<br>再翻翻评论。</h2>
+        <p class="lead">长文慢慢读，回复接着看。<br>转发、评论和赞，就在正文下面。</p>
+        <div class="feature-tags"><span>长文阅读</span><span>楼中楼回复</span><span>分享卡片</span></div>
+        <div class="scene-line"><span>点击右侧讨论分类试一试</span><span>转发 / 评论 / 赞</span></div>
+        <p class="disclosure">HTML 界面示意 · 非实机截图<br>演示内容不代表真实用户发言或互动数据。</p>
+      </div>
+      <div class="device-zone"><div class="device"><div class="screen" id="detail-screen"></div></div><div class="device-caption">详情 · 正文下方的讨论区</div></div>
+    </section>
+  </main>
+  <footer>Fluo · 独立开发的第三方微博客户端。<a href="../../README.md">项目介绍</a><a href="https://github.com/HaiYangMa13/fluo">GitHub</a><p>本页是离线 HTML 展示，不是应用的 Web 版本；示例按钮不会发送、点赞或关注。</p></footer>
+</body>
+</html>
