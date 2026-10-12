@@ -1,6 +1,7 @@
 import { webview } from '@kit.ArkWeb';
 import { HdsNavDestination } from '@kit.UIDesignKit';
 import { Theme, isDarkMode } from '../common/Theme';
+import { syncWeiboSplitNavigation } from '../common/WeiboNavigationLayout';
 
 @Builder
 export function WeiboBrowserBuilder(): void { WeiboBrowser() }
@@ -31,47 +32,66 @@ export struct WeiboBrowser {
     catch (_error) { this.loading = false; this.errorMessage = '网页刷新失败，请返回重试'; }
   }
 
+  private popRoute(): void {
+    this.weiboNavStack.pop();
+    syncWeiboSplitNavigation(this.weiboNavStack);
+  }
+
   @Builder
   BrowserTitle() {
     Row({ space: 12 }) {
       Button('‹').height(44).width(44).backgroundColor(Color.Transparent).accessibilityText('网页后退')
-        .onClick((): void => { if (!this.goBack()) { this.weiboNavStack.pop(); } })
+        .onClick((): void => { if (!this.goBack()) { this.popRoute(); } })
       Text(this.title).layoutWeight(1).maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
       Button('刷新').height(44).backgroundColor(Color.Transparent).enabled(this.url.length > 0)
         .onClick((): void => { this.refresh(); })
       Button('关闭').height(44).backgroundColor(Color.Transparent)
-        .onClick((): void => { this.weiboNavStack.pop(); })
+        .onClick((): void => { this.popRoute(); })
     }.width('100%').padding({ left: 12, right: 12 })
   }
 
   build() {
     HdsNavDestination() {
-      Column() {
-        if (this.loading && this.url.length > 0) {
-          LoadingProgress().width(24).height(24)
-        }
+      Stack({ alignContent: Alignment.Top }) {
         if (this.url.length > 0) {
-          if (this.errorMessage.length > 0) {
-            Text(this.errorMessage).fontColor(Theme.danger()).padding(12)
+          Column() {
+            if (this.errorMessage.length > 0) {
+              Text(this.errorMessage).fontColor(Theme.danger()).padding(12)
+            }
+            Web({ src: this.url, controller: this.controller, incognitoMode: true })
+              .javaScriptAccess(true).domStorageAccess(true).fileAccess(false)
+              .mixedMode(MixedMode.None).layoutWeight(1).width('100%')
+              .onPageBegin((): void => { this.loading = true; this.errorMessage = ''; })
+              .onPageEnd((): void => { this.loading = false; })
+              .onErrorReceive((event): void => {
+                if (event !== undefined && event.request.isMainFrame()) { this.loading = false; this.errorMessage = '网页加载失败，请检查网络或点击刷新'; }
+              })
+              .onTitleReceive((event): void => { if (event !== undefined) { this.title = event.title; } })
+              .onOverrideUrlLoading((request): boolean => !/^https?:\/\//i.test(request.getRequestUrl()))
           }
-          Web({ src: this.url, controller: this.controller, incognitoMode: true })
-            .javaScriptAccess(true).domStorageAccess(true).fileAccess(false)
-            .mixedMode(MixedMode.None).layoutWeight(1).width('100%')
-            .onPageBegin((): void => { this.loading = true; this.errorMessage = ''; })
-            .onPageEnd((): void => { this.loading = false; })
-            .onErrorReceive((event): void => {
-              if (event !== undefined && event.request.isMainFrame()) { this.loading = false; this.errorMessage = '网页加载失败，请检查网络或点击刷新'; }
-            })
-            .onTitleReceive((event): void => { if (event !== undefined) { this.title = event.title; } })
-            .onOverrideUrlLoading((request): boolean => !/^https?:\/\//i.test(request.getRequestUrl()))
+          .width('100%')
+          .height('100%')
+
+          if (this.loading) {
+            LoadingProgress()
+              .width(28)
+              .height(28)
+              .color(Theme.brand())
+              .margin({ top: 12 })
+          }
         } else {
           Text('不支持的链接').fontColor(Theme.textSecondary(isDarkMode()))
+            .margin({ top: 40 })
         }
       }.width('100%').height('100%').backgroundColor(Theme.bg(isDarkMode()))
     }.hideBackButton(true)
       .titleBar({ content: { stackBuilder: (): void => this.BrowserTitle() } })
       .onBackPressed((): boolean => {
-        return this.goBack();
+        if (this.goBack()) {
+          return true;
+        }
+        this.popRoute();
+        return true;
       })
   }
 }

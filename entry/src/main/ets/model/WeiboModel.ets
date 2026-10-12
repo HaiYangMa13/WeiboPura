@@ -45,6 +45,8 @@ export interface WeiboPost {
   isFavorited?: boolean;
   isFollowed?: boolean;
   repost: WeiboPost | null;
+  /** High-quality selected comment preview displayed in responsive feed card. */
+  hotComment?: WeiboComment | null;
 }
 
 /** One cursor-based page from the logged-in account's following feed. */
@@ -78,7 +80,37 @@ export interface WeiboNotification {
   content: string;
   targetSnippet: string;
   targetPostId: string;
+  targetCommentId?: string;
   createdAt: string;
+}
+
+/** Detail page secondary tab selection. */
+export enum WeiboDetailTab {
+  Reposts = 0,
+  Comments = 1,
+  Likes = 2,
+}
+
+/** A user who liked a status. */
+export interface WeiboLikeUser {
+  id: string;
+  userName: string;
+  userAvatar: string;
+  followersCount: string;
+  verified: boolean;
+  verifiedType?: number;
+}
+
+export interface WeiboLikesPage {
+  items: WeiboLikeUser[];
+  nextPage: number;
+  hasMore: boolean;
+}
+
+export interface WeiboRepostsPage {
+  items: WeiboPost[];
+  nextPage: number;
+  hasMore: boolean;
 }
 
 /** Server comment order; new detail pages always start with Hot. */
@@ -123,4 +155,11 @@ export interface WeiboSuggestion {
   word: string;
   count: number;
   isHot: boolean;
+  isTopic?: boolean;
+}
+
+/** Search suggestion bundle with matched users and query completions. */
+export interface WeiboSearchSuggestionBundle {
+  users: WeiboUser[];
+  suggestions: WeiboSuggestion[];
 }

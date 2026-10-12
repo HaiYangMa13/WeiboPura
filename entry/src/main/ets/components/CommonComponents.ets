@@ -1,3 +1,4 @@
+import { WEIBO_TAP_MAX_MOVEMENT } from '../common/WeiboTabSwipe';
 /*
  * TiebaPura - HarmonyOS 原生 ArkTS 实现的第三方百度贴吧客户端
  * Copyright (C) 2026 a307608689-afk
@@ -546,7 +547,7 @@ export struct ThreadCard {
               .hitTestBehavior(HitTestMode.Default)
               .onClick(() => {
                 this.onAvatarTap(this.getItem().authorId ?? '', this.getItem().author);
-              })
+              }, WEIBO_TAP_MAX_MOVEMENT)
           } else {
             Stack() {
               Text(this.getItem().author.charAt(0))
@@ -562,7 +563,7 @@ export struct ThreadCard {
             .hitTestBehavior(HitTestMode.Default)
             .onClick(() => {
               this.onAvatarTap(this.getItem().authorId ?? '', this.getItem().author);
-            })
+            }, WEIBO_TAP_MAX_MOVEMENT)
           }
 
           // 作者名和时间
@@ -575,7 +576,7 @@ export struct ThreadCard {
               .onClick(() => {
                 // 点击作者名跳用户主页（Default 允许拖拽滚动手势穿透到外层滚动组件）
                 this.onAvatarTap(this.getItem().authorId ?? '', this.getItem().author);
-              })
+              }, WEIBO_TAP_MAX_MOVEMENT)
             Text(this.getItem().createTime)
               .fontSize(fs(12, this.fontScale))
               .fontColor(Theme.textTertiary(isDarkMode()))
@@ -640,7 +641,7 @@ export struct ThreadCard {
             .borderRadius(Radius.md)
             .hitTestBehavior(HitTestMode.Default)
             .accessibilityText(`查看${this.getItem().repostAuthor ?? ''}的原微博`)
-            .onClick((): void => { this.onAbstractTap(); })
+            .onClick((): void => { this.onAbstractTap(); }, WEIBO_TAP_MAX_MOVEMENT)
           } else {
             Text(this.getItem().abstract)
               .fontSize(fs(14, this.fontScale))
@@ -706,7 +707,7 @@ export struct ThreadCard {
         if (tid.length > 0) {
           this.onTap(tid);
         }
-      })
+      }, WEIBO_TAP_MAX_MOVEMENT)
 
       // ========== 操作栏（独立区域）：分享/评论/点赞三胶囊，完全不在跳转详情的点击区域内 ==========
       // 窄卡收紧模式（actionCompact）：图标 15/文字 11/内距 4/高 30/圆角 15/外距 8——
@@ -741,7 +742,7 @@ export struct ThreadCard {
             firstImage: this.getItem().firstImage
           };
           this.onShare(payload);
-        })
+        }, WEIBO_TAP_MAX_MOVEMENT)
         
         // 评论按钮 - 玻璃胶囊背景不变 + 实心气泡三点图标 ellipsis_message_fill（与分享 sys.symbol.share 同为填充风格，避免描边图标过细）
         Row({ space: this.actionCompact() ? 4 : 6 }) {
@@ -767,7 +768,7 @@ export struct ThreadCard {
           if (tid.length > 0) {
             this.onComment(tid);
           }
-        })
+        }, WEIBO_TAP_MAX_MOVEMENT)
         
         // 点赞按钮 - 玻璃胶囊背景不变 + 简约心形轮廓/实心SymbolGlyph（匹配参考图一）
         Row({ space: this.actionCompact() ? 4 : 6 }) {
@@ -803,7 +804,7 @@ export struct ThreadCard {
             Haptic.light();
             this.onLike(tid, targetPid, liked);
           }
-        })
+        }, WEIBO_TAP_MAX_MOVEMENT)
       }
       .width('100%')
       .padding({ left: 16, right: 16, top: 12, bottom: 14 })
@@ -899,7 +900,7 @@ export struct ThreadCard {
       .hitTestBehavior(HitTestMode.Default)
       .onClick(() => {
         this.onTap(this.getItem().tid);
-      })
+      }, WEIBO_TAP_MAX_MOVEMENT)
     } else if (this.getImageCount() === 1) {
           // 单图：单列档逐像素保持 height(220)；多列档列宽变窄，改 16:10 比例，
           // 避免"列宽 240 时接近方形 / 列宽 400 时明显变扁"（§4.2 决策 6）。
@@ -921,7 +922,7 @@ export struct ThreadCard {
               })
               .onClick(() => {
                 this.onImageTap(this.getItem().images!, 0);
-              })
+              }, WEIBO_TAP_MAX_MOVEMENT)
           } else {
             Image(this.resolveImgUrl(this.getItem().images![0]))
               .width('100%')
@@ -937,7 +938,7 @@ export struct ThreadCard {
               })
               .onClick(() => {
                 this.onImageTap(this.getItem().images!, 0);
-              })
+              }, WEIBO_TAP_MAX_MOVEMENT)
           }
         } else {
           // 多图网格（2-9张），使用 Grid 实现均匀间距
@@ -965,7 +966,7 @@ export struct ThreadCard {
                     })
                     .onClick(() => {
                       this.onImageTap(this.getItem().images!, idx);
-                    })
+                    }, WEIBO_TAP_MAX_MOVEMENT)
                 } else {
                   Image(this.resolveImgUrl(img))
                     .width('100%')
@@ -981,7 +982,7 @@ export struct ThreadCard {
                     })
                     .onClick(() => {
                       this.onImageTap(this.getItem().images!, idx);
-                    })
+                    }, WEIBO_TAP_MAX_MOVEMENT)
                 }
               }
             }, (img: string, idx: number) => `${idx}`)

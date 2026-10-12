@@ -2,6 +2,8 @@ import { ThreadCard, ThreadItemData, EmptyView, ErrorView, LoadingView } from '.
 import { curves } from '@kit.ArkUI';
 import { WeiboPost, WeiboSuggestion } from '../model/WeiboModel';
 import { WeiboService } from '../service/WeiboService';
+import { common } from '@kit.AbilityKit';
+import { ShareUtil } from '../common/ShareUtil';
 import { ImmBlur, ImmMaterial, Radius, Spacing, Theme, fs, isDarkMode } from '../common/Theme';
 
 enum SearchLoadState {
@@ -121,6 +123,12 @@ export struct WeiboSearch {
       this.errorMessage = (error as Error).message ?? '微博搜索加载失败，请稍后重试';
       this.state = SearchLoadState.Error;
     }
+  }
+
+  private sharePost(post: WeiboPost): void {
+    const context: common.UIAbilityContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    ShareUtil.shareLink(this.getUIContext(), context, `https://m.weibo.cn/detail/${post.id}`,
+      post.userName, post.text);
   }
 
   private toThreadCard(post: WeiboPost): ThreadItemData {
@@ -246,6 +254,7 @@ export struct WeiboSearch {
                 onAbstractTap: (): void => { this.openOriginalPost(post); },
                 abstractIsLink: post.repost !== null,
                 onComment: (_id: string): void => { this.openPost(post); },
+                onShare: (): void => { this.sharePost(post); },
                 onAvatarTap: (id: string, name: string): void => { this.openUserProfile(id, name); },
                 onImageTap: (urls: string[], index: number): void => { this.openImagePreview(urls, index); },
                 skipImageCache: true,

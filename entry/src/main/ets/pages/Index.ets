@@ -1,3 +1,4 @@
+import { WeiboTabTouchTracker } from '../common/WeiboTabSwipe';
 import { common, ConfigurationConstant } from '@kit.AbilityKit';
 import { curves, LengthMetrics, SymbolGlyphModifier } from '@kit.ArkUI';
 import {
@@ -21,7 +22,7 @@ import { WeiboAuthManager } from '../service/WeiboAuthManager';
 import { AppSettingsStore, DEFAULT_HOME_TAB_MATERIAL_LEVEL } from '../service/AppSettingsStore';
 import { createWeiboDockStyle } from '../common/WeiboDockStyle';
 import { WeiboService } from '../service/WeiboService';
-import { WeiboHotTopic, WeiboNotification, WeiboPost, WeiboUser } from '../model/WeiboModel';
+import { WeiboDetailTab, WeiboHotTopic, WeiboNotification, WeiboPost, WeiboUser } from '../model/WeiboModel';
 import { WeiboHomeTab, WeiboTimelineMode } from './WeiboHomeTab';
 import { WeiboPostDetailBuilder, WeiboPostDetailRouteParam } from './WeiboPostDetail';
 import { WeiboUserProfileBuilder, WeiboUserProfileRouteParam } from './WeiboUserProfile';
@@ -32,6 +33,7 @@ import { WeiboSearch } from './WeiboSearch';
 import { WeiboComposeDialog } from '../components/WeiboComposeDialog';
 import { WeiboVisitorBootstrap } from '../components/WeiboVisitorBootstrap';
 import { WeiboRichTextView } from '../components/WeiboRichTextView';
+import { WeiboReadingPositionManager } from '../service/WeiboReadingPositionManager';
 import { Haptic } from '../common/Haptic';
 import {
   syncWeiboSplitNavigation,
@@ -82,6 +84,7 @@ struct Index {
   @State messagePage: number = 0;
   @State hasMoreMessages: boolean = true;
   @State messageError: string = '';
+  @State readNotificationIds: string[] = [];
   private messageEpoch: number = 0;
   @State mineTranslateX: number = 0;
   @State mineOpacity: number = 1;
@@ -213,10 +216,17 @@ struct Index {
     this.updateNavigationMode();
   }
 
-  private openPostDetail(post: WeiboPost): void {
+  private openPostDetail(post: WeiboPost, tab?: WeiboDetailTab, autoFocusComment?: boolean, targetCommentId?: string): void {
+    WeiboReadingPositionManager.getInstance().flush().catch((): void => {});
     WeiboService.getInstance().rememberPost(post);
     WeiboService.getInstance().prefetchComments(post.id);
-    const param: WeiboPostDetailRouteParam = { postId: post.id };
+    const param: WeiboPostDetailRouteParam = {
+      postId: post.id,
+      post: post,
+      initialTab: tab,
+      autoFocusComment: autoFocusComment,
+      targetCommentId: targetCommentId
+    };
     this.openContentDestination();
     this.weiboNavStack.pushPath({ name: 'WeiboPostDetail', param: param });
   }
@@ -315,6 +325,7 @@ struct Index {
     if (this.homeMode === mode) {
       return;
     }
+    WeiboReadingPositionManager.getInstance().flush().catch((): void => {});
     this.homeMode = mode;
     this.hdsTabsController.unbindScroller(this.homeRecommendScroller);
     this.hdsTabsController.unbindScroller(this.homeFollowingScroller);
@@ -326,6 +337,29 @@ struct Index {
     }
   }
 
+  @State tabDragOffset: number = 0;
+  @State tabDragging: boolean = false;
+  private tabTouchTracker: WeiboTabTouchTracker = new WeiboTabTouchTracker('home');
+  private titleTouchTracker: WeiboTabTouchTracker = new WeiboTabTouchTracker('home-title');
+
+  private resetTabDrag(): void {
+    this.tabDragging = false;
+    this.tabDragOffset = 0;
+  }
+
+  private onHomeTabPanEnd(event: GestureEvent, tracker: WeiboTabTouchTracker): void {
+    const direction: number = tracker.finish(event);
+    this.resetTabDrag();
+    if (this.selectedTab !== WeiboTab.Home || direction === 0) { return; }
+    if (direction === 1 && this.homeMode === WeiboTimelineMode.Following) {
+      Haptic.light();
+      this.switchHomeMode(WeiboTimelineMode.Recommend);
+    } else if (direction === -1 && this.homeMode === WeiboTimelineMode.Recommend) {
+      Haptic.light();
+      this.switchHomeMode(WeiboTimelineMode.Following);
+    }
+  }
+
   /** Programmatic selection is shared by the title-bar search shortcut and HdsTabs. */
   private switchTab(index: number): void {
     if (this.isTabBarHidden) {
@@ -333,6 +367,9 @@ struct Index {
     }
     if (index === this.selectedTab) {
       return;
+    }
+    if (this.selectedTab === WeiboTab.Home) {
+      WeiboReadingPositionManager.getInstance().flush().catch((): void => {});
     }
     this.selectedTab = index;
     try {
@@ -550,7 +587,7 @@ struct Index {
   /** Native HDS title content lets the framework place text against the real safe area. */
   private currentHdsTitle(): Resource {
     if (this.selectedTab === WeiboTab.Discover) {
-      return $r('app.string.weibo_tab_hot');
+      return $r('app.string.weibo_tab_discover');
     }
     if (this.selectedTab === WeiboTab.Search) {
       return $r('app.string.weibo_search_title');
@@ -726,13 +763,15 @@ struct Index {
           animationTrigger: this.page1Enter,
           exitTrigger: this.page1Exit,
           onScrollDirection: (visible: boolean): void => this.setTabBarVisible(visible),
-          onOpenPost: (post: WeiboPost): void => this.openPostDetail(post),
+          onOpenPost: (post: WeiboPost, tab?: WeiboDetailTab, autoFocusComment?: boolean, targetCommentId?: string): void => this.openPostDetail(post, tab, autoFocusComment, targetCommentId),
           onOpenUserProfile: (userId: string, userName: string): void => this.openUserProfile(userId, userName)
         })
       }
       .width('100%')
       .height('100%')
       .visibility(this.homeMode === WeiboTimelineMode.Recommend ? Visibility.Visible : Visibility.Hidden)
+      .translate({ x: this.tabDragOffset })
+      .animation({ duration: this.tabDragging ? 0 : 180, curve: Curve.EaseOut })
       Stack() {
         WeiboHomeTab({
           mode: WeiboTimelineMode.Following,
@@ -744,17 +783,43 @@ struct Index {
           animationTrigger: this.page1Enter,
           exitTrigger: this.page1Exit,
           onScrollDirection: (visible: boolean): void => this.setTabBarVisible(visible),
-          onOpenPost: (post: WeiboPost): void => this.openPostDetail(post),
+          onOpenPost: (post: WeiboPost, tab?: WeiboDetailTab, autoFocusComment?: boolean, targetCommentId?: string): void => this.openPostDetail(post, tab, autoFocusComment, targetCommentId),
           onOpenUserProfile: (userId: string, userName: string): void => this.openUserProfile(userId, userName)
         })
       }
       .width('100%')
       .height('100%')
       .visibility(this.homeMode === WeiboTimelineMode.Following ? Visibility.Visible : Visibility.Hidden)
+      .translate({ x: this.tabDragOffset })
+      .animation({ duration: this.tabDragging ? 0 : 180, curve: Curve.EaseOut })
     }
     .width('100%')
     .height('100%')
     .backgroundColor(Theme.bg(this.isDark))
+    .clip(true)
+    .onTouch((event: TouchEvent): void => {
+      this.tabTouchTracker.track(event);
+      if (event.type === TouchType.Cancel) { this.resetTabDrag(); }
+    })
+    .gesture(
+      PanGesture({ fingers: 1, direction: PanDirection.Horizontal, distance: 12 })
+        .tag('weibo-tab-swipe')
+        .onActionStart((): void => {
+          this.tabTouchTracker.claim();
+          this.tabDragging = true;
+        })
+        .onActionUpdate((event: GestureEvent): void => {
+          this.tabDragOffset = this.tabTouchTracker.update(event, this.homeMode === WeiboTimelineMode.Recommend, this.homeMode === WeiboTimelineMode.Following);
+        })
+        .onActionEnd((event: GestureEvent): void => { this.onHomeTabPanEnd(event, this.tabTouchTracker); })
+        .onActionCancel((): void => {
+          this.tabTouchTracker.cancel();
+          this.resetTabDrag();
+        })
+    )
+    .onGestureJudgeBegin((info: GestureInfo, event: BaseGestureEvent): GestureJudgeResult => {
+      return this.tabTouchTracker.judge(info, event, this.selectedTab === WeiboTab.Home);
+    })
   }
 
   private composeController: CustomDialogController | null = null;
@@ -773,6 +838,7 @@ struct Index {
       }),
       alignment: DialogAlignment.Bottom,
       customStyle: true,
+      autoCancel: false,
       offset: { dx: 0, dy: -20 }
     });
     this.composeController.open();
@@ -874,6 +940,29 @@ struct Index {
     .padding({ left: Spacing.md, right: Spacing.md })
     .alignItems(VerticalAlign.Center)
     .backgroundColor(Color.Transparent)
+    .onTouch((event: TouchEvent): void => {
+      this.titleTouchTracker.track(event);
+      if (event.type === TouchType.Cancel) { this.resetTabDrag(); }
+    })
+    .gesture(
+      PanGesture({ fingers: 1, direction: PanDirection.Horizontal, distance: 12 })
+        .tag('weibo-tab-swipe')
+        .onActionStart((): void => {
+          this.titleTouchTracker.claim();
+          this.tabDragging = true;
+        })
+        .onActionUpdate((event: GestureEvent): void => {
+          this.tabDragOffset = this.titleTouchTracker.update(event, this.homeMode === WeiboTimelineMode.Recommend, this.homeMode === WeiboTimelineMode.Following);
+        })
+        .onActionEnd((event: GestureEvent): void => { this.onHomeTabPanEnd(event, this.titleTouchTracker); })
+        .onActionCancel((): void => {
+          this.titleTouchTracker.cancel();
+          this.resetTabDrag();
+        })
+    )
+    .onGestureJudgeBegin((info: GestureInfo, event: BaseGestureEvent): GestureJudgeResult => {
+      return this.titleTouchTracker.judge(info, event, this.selectedTab === WeiboTab.Home);
+    })
   }
 
   /** HarmonyX-style title-bar bottom region: a material search field below the native title. */
@@ -953,6 +1042,27 @@ struct Index {
         }
       }
     }
+  }
+
+  private markNotificationRead(id: string): void {
+    if (!this.readNotificationIds.includes(id)) {
+      this.readNotificationIds.push(id);
+    }
+  }
+
+  private openNotificationDetail(item: WeiboNotification): void {
+    this.markNotificationRead(item.id);
+    if (item.targetPostId.length === 0) {
+      this.getUIContext().getPromptAction().showToast({ message: '原微博暂不可用或已被删除' });
+      return;
+    }
+    const initialTab: WeiboDetailTab = item.type === 'like' ? WeiboDetailTab.Likes : WeiboDetailTab.Comments;
+    const param: WeiboPostDetailRouteParam = {
+      postId: item.targetPostId,
+      initialTab: initialTab,
+      targetCommentId: item.targetCommentId
+    };
+    this.weiboNavStack.pushPath({ name: 'WeiboPostDetail', param: param });
   }
 
   private switchMessageType(type: 'all' | 'mention' | 'comment' | 'like'): void {
@@ -1142,6 +1252,11 @@ struct Index {
                           this.weiboNavStack.pushPath({ name: 'WeiboUserProfile', param: param });
                         }
                       })
+                    if (!this.readNotificationIds.includes(item.id)) {
+                      Circle({ width: 6, height: 6 })
+                        .fill(Theme.brand())
+                        .margin({ right: 6 })
+                    }
                     Text(item.createdAt)
                       .fontSize(fs(11, this.fontScale))
                       .fontColor(Theme.textTertiary(this.isDark))
@@ -1204,6 +1319,9 @@ struct Index {
               .borderRadius(Radius.postCard)
               .shadow(Theme.glassShadowStyle())
               .border({ width: 0.5, color: Theme.cardBorder(this.isDark) })
+              .onClick(() => {
+                this.openNotificationDetail(item);
+              })
             }, (item: WeiboNotification): string => item.id)
             if (this.messagesLoadingMore) {
               LoadingProgress().width(24).height(44)
@@ -1335,6 +1453,16 @@ struct Index {
       params: { mode: 'likes', userId: uid }
     }).catch(() => {
       this.getUIContext().getPromptAction().showToast({ message: '点赞页面打开失败，请稍后重试' });
+    });
+  }
+
+  private openHistory(): void {
+    const uid: string = this.accountProfile?.id ?? '';
+    this.getUIContext().getRouter().pushUrl({
+      url: 'pages/WeiboFeed',
+      params: { mode: 'history', userId: uid }
+    }).catch(() => {
+      this.getUIContext().getPromptAction().showToast({ message: '浏览历史打开失败，请稍后重试' });
     });
   }
 
@@ -1482,7 +1610,8 @@ struct Index {
         Column() {
           this.MineEntry($r('sys.symbol.doc'), '我的微博', '读取当前登录账号发布的微博', () => { this.openMyPosts(); })
           this.MineEntry($r('sys.symbol.star'), '我的收藏', '查看已收藏的微博', () => { this.openFavorites(); })
-          this.MineEntry($r('sys.symbol.heart'), '我的点赞', '查看点赞过的微博历史', () => { this.openLikes(); }, true)
+          this.MineEntry($r('sys.symbol.heart'), '我的点赞', '查看点赞过的微博历史', () => { this.openLikes(); })
+          this.MineEntry($r('sys.symbol.clock'), '浏览历史', '找回最近看过的微博', () => { this.openHistory(); }, true)
         }
         .width('100%')
         .backgroundColor(Theme.bgCard(this.isDark))
@@ -1555,7 +1684,7 @@ struct Index {
 
   private symbolFor(index: number): Resource {
     if (index === WeiboTab.Discover) {
-      return $r('sys.symbol.flame_fill');
+      return $r('sys.symbol.compass');
     }
     if (index === WeiboTab.Search) {
       return $r('sys.symbol.magnifyingglass');
@@ -1600,10 +1729,13 @@ struct Index {
         onScrollDirection: (visible: boolean): void => this.setTabBarVisible(visible),
         onSelectTopic: (topic: WeiboHotTopic): void => {
           this.openSearchTopic(topic.word);
+        },
+        onOpenUserProfile: (userId: string, userName: string): void => {
+          this.openUserProfile(userId, userName);
         }
       })
     }
-    .tabBar(this.hdsTabBar(this.symbolFor(WeiboTab.Discover), $r('app.string.weibo_tab_hot')))
+    .tabBar(this.hdsTabBar(this.symbolFor(WeiboTab.Discover), $r('app.string.weibo_tab_discover')))
 
     TabContent() {
       this.MessagesPage()
@@ -1644,7 +1776,7 @@ struct Index {
     .height('100%')
     .barPosition(BarPosition.End)
     .barOverlap(true)
-    .scrollable(true)
+    .scrollable(this.selectedTab !== WeiboTab.Home)
     .animationDuration(0)
     .attributeModifier(this.hdsTabsModifier)
     .backgroundColor(Theme.bg(this.isDark))

@@ -25,6 +25,8 @@ import { UsageHabitsManager } from '../service/UsageHabitsManager';
 import { CacheManager, STORE_NAME } from '../cache/CacheManager';
 import { CACHE_KEY } from '../common/Constants';
 import { AppSettingsStore } from '../service/AppSettingsStore';
+import { WeiboReadingPositionManager } from '../service/WeiboReadingPositionManager';
+import { WeiboDraftManager } from '../service/WeiboDraftManager';
 import { WEIBO_BREAKPOINT_KEY, WeiboResponsiveLayout } from '../common/WeiboNavigationLayout';
 
 const TAG: string = 'EntryAbility';
@@ -340,5 +342,7 @@ export default class EntryAbility extends UIAbility {
 
   onBackground(): void {
     hilog.info(0x0000, TAG, 'Ability onBackground');
+    WeiboReadingPositionManager.getInstance().flush().catch((): void => {});
+    WeiboDraftManager.getInstance().flush().catch((): void => {});
   }
 }

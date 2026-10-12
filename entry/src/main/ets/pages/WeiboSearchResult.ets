@@ -1,3 +1,4 @@
+import { WeiboTabTouchTracker, WEIBO_TAP_MAX_MOVEMENT } from '../common/WeiboTabSwipe';
 import { WeiboPost, WeiboSearchCompositeResult, WeiboSearchType, WeiboUser } from '../model/WeiboModel';
 import { WeiboService } from '../service/WeiboService';
 import { WeiboAuthManager } from '../service/WeiboAuthManager';
@@ -10,9 +11,20 @@ import { common } from '@kit.AbilityKit';
 import { DividerShowType, HdsNavDestination, HdsNavDestinationTitleMode, ScrollEffectType, hdsMaterial } from '@kit.UIDesignKit';
 import { WeiboPostDetailRouteParam } from './WeiboPostDetail';
 import { WeiboUserProfileRouteParam } from './WeiboUserProfile';
+import { CacheManager } from '../cache/CacheManager';
+import { CACHE_KEY } from '../common/Constants';
+import { syncWeiboSplitNavigation } from '../common/WeiboNavigationLayout';
 
 export interface WeiboSearchResultRouteParam {
   query: string;
+}
+
+interface SearchTabSnapshot {
+  posts: WeiboPost[];
+  users: WeiboUser[];
+  highlightUser: WeiboUser | null;
+  currentPage: number;
+  hasMore: boolean;
 }
 
 @Builder
@@ -28,7 +40,89 @@ export struct WeiboSearchResult {
   @State posts: WeiboPost[] = [];
   @State users: WeiboUser[] = [];
   @State highlightUser: WeiboUser | null = null;
+  private tabSnapshots: Map<number, SearchTabSnapshot> = new Map();
+  @StorageLink('weibo_sync_like') @Watch('onGlobalLikeSync') globalLikeSync: string = '';
+  @StorageLink('weibo_sync_follow') @Watch('onGlobalFollowSync') globalFollowSync: string = '';
+
+  private onGlobalLikeSync(): void {
+    if (!this.globalLikeSync) { return; }
+    const parts: string[] = this.globalLikeSync.split(':');
+    if (parts.length >= 2) {
+      const postId: string = parts[0];
+      const liked: boolean = parts[1] === 'true';
+      let changed: boolean = false;
+      const updated: WeiboPost[] = this.posts.map((p: WeiboPost): WeiboPost => {
+        if (p.id === postId && p.isLiked !== liked) {
+          changed = true;
+          return withWeiboLike(p, liked);
+        }
+        return p;
+      });
+      if (changed) {
+        this.posts = updated;
+      }
+    }
+  }
+
+  private onGlobalFollowSync(): void {
+    if (!this.globalFollowSync) { return; }
+    const parts: string[] = this.globalFollowSync.split(':');
+    if (parts.length >= 2) {
+      const userId: string = parts[0];
+      const followed: boolean = parts[1] === 'true';
+      let changed: boolean = false;
+      const updatedUsers: WeiboUser[] = this.users.map((u: WeiboUser): WeiboUser => {
+        if (u.id === userId && u.following !== followed) {
+          changed = true;
+          const updatedUser: WeiboUser = {
+            id: u.id,
+            screenName: u.screenName,
+            avatarUrl: u.avatarUrl,
+            coverUrl: u.coverUrl,
+            description: u.description,
+            followersCount: u.followersCount,
+            followingCount: u.followingCount,
+            statusesCount: u.statusesCount,
+            verified: u.verified,
+            verifiedReason: u.verifiedReason,
+            following: followed
+          };
+          return updatedUser;
+        }
+        return u;
+      });
+      if (changed) {
+        this.users = updatedUsers;
+      }
+      if (this.highlightUser !== null && this.highlightUser.id === userId && this.highlightUser.following !== followed) {
+        const updatedHighlight: WeiboUser = {
+          id: this.highlightUser.id,
+          screenName: this.highlightUser.screenName,
+          avatarUrl: this.highlightUser.avatarUrl,
+          coverUrl: this.highlightUser.coverUrl,
+          description: this.highlightUser.description,
+          followersCount: this.highlightUser.followersCount,
+          followingCount: this.highlightUser.followingCount,
+          statusesCount: this.highlightUser.statusesCount,
+          verified: this.highlightUser.verified,
+          verifiedReason: this.highlightUser.verifiedReason,
+          following: followed
+        };
+        this.highlightUser = updatedHighlight;
+      }
+    }
+  }
+
+  private saveSearchHistory(word: string): void {
+    const trimmed: string = word.trim();
+    if (trimmed.length === 0) { return; }
+    const history: string[] = AppStorage.get<string[]>('weiboSearchHistory') ?? [];
+    const updated: string[] = [trimmed, ...history.filter((k: string): boolean => k !== trimmed)].slice(0, 10);
+    AppStorage.setOrCreate<string[]>('weiboSearchHistory', updated);
+    CacheManager.getInstance().put(CACHE_KEY.WEIBO_SEARCH_HISTORY, JSON.stringify(updated)).catch((): void => {});
+  }
   @State currentTab: number = 0;
+  private categoryScroller: Scroller = new Scroller();
   private readonly tabs: string[] = ['综合', '实时', '用户', '视频', '图片'];
   private readonly tabTypes: WeiboSearchType[] = [
     WeiboSearchType.All,
@@ -88,17 +182,70 @@ export struct WeiboSearchResult {
     if (this.currentTab === index) {
       return;
     }
+    if (this.tabSnapshots === undefined || this.tabSnapshots === null) {
+      this.tabSnapshots = new Map();
+    }
+    // 保存当前分类状态快照
+    const currentSnapshot: SearchTabSnapshot = {
+      posts: this.posts,
+      users: this.users,
+      highlightUser: this.highlightUser,
+      currentPage: this.currentPage,
+      hasMore: this.hasMore
+    };
+    this.tabSnapshots.set(this.currentTab, currentSnapshot);
+
     this.currentTab = index;
     Haptic.light();
-    this.posts = [];
-    this.users = [];
-    this.highlightUser = null;
-    this.currentPage = 1;
-    this.hasMore = true;
-    this.errorMessage = '';
-    this.moreError = '';
-    if (this.query.length > 0) {
-      this.executeSearch(this.query, 1, false);
+    try {
+      this.categoryScroller.scrollTo({
+        xOffset: Math.max(0, (index - 1) * 60),
+        yOffset: 0,
+        animation: { duration: 200, curve: Curve.FastOutSlowIn }
+      });
+    } catch (_err) {
+    }
+
+    const snapshot: SearchTabSnapshot | undefined = this.tabSnapshots.get(index);
+    if (snapshot !== undefined && (snapshot.posts.length > 0 || snapshot.users.length > 0)) {
+      // 快速恢复该分类已加载的内容，保持阅读连续性，免除白屏重刷
+      this.posts = snapshot.posts;
+      this.users = snapshot.users;
+      this.highlightUser = snapshot.highlightUser;
+      this.currentPage = snapshot.currentPage;
+      this.hasMore = snapshot.hasMore;
+      this.errorMessage = '';
+      this.moreError = '';
+      this.loading = false;
+    } else {
+      this.posts = [];
+      this.users = [];
+      this.highlightUser = null;
+      this.currentPage = 1;
+      this.hasMore = true;
+      this.errorMessage = '';
+      this.moreError = '';
+      if (this.query.length > 0) {
+        this.executeSearch(this.query, 1, false);
+      }
+    }
+  }
+
+  @State tabDragOffset: number = 0;
+  @State tabDragging: boolean = false;
+  private tabTouchTracker: WeiboTabTouchTracker = new WeiboTabTouchTracker('search');
+
+  private resetTabDrag(): void {
+    this.tabDragging = false;
+    this.tabDragOffset = 0;
+  }
+
+  private onSearchTabPanEnd(event: GestureEvent): void {
+    const direction: number = this.tabTouchTracker.finish(event);
+    this.resetTabDrag();
+    const next: number = this.currentTab + direction;
+    if (direction !== 0 && next >= 0 && next < this.tabs.length) {
+      this.switchTab(next);
     }
   }
 
@@ -222,6 +369,7 @@ export struct WeiboSearchResult {
 
   private popRoute(): void {
     this.weiboNavStack.pop();
+    syncWeiboSplitNavigation(this.weiboNavStack);
   }
 
   private openPost(post: WeiboPost): void {
@@ -229,7 +377,9 @@ export struct WeiboSearchResult {
       this.getUIContext().getPromptAction().showToast({ message: $r('app.string.weibo_post_unavailable') });
       return;
     }
-    const param: WeiboPostDetailRouteParam = { postId: post.id };
+    WeiboService.getInstance().rememberPost(post);
+    WeiboService.getInstance().prefetchComments(post.id);
+    const param: WeiboPostDetailRouteParam = { postId: post.id, post: post };
     this.weiboNavStack.pushPath({ name: 'WeiboPostDetail', param: param });
   }
 
@@ -407,7 +557,7 @@ export struct WeiboSearchResult {
         .padding({ left: 10, right: 10 })
         .onClick((): void => {
           this.toggleFollowUser(user);
-        })
+        }, WEIBO_TAP_MAX_MOVEMENT)
     }
     .width('100%')
     .padding(Spacing.md)
@@ -416,7 +566,7 @@ export struct WeiboSearchResult {
     .border({ width: 0.5, color: Theme.cardBorder(this.isDark) })
     .onClick((): void => {
       this.openUserProfile(user.id, user.screenName);
-    })
+    }, WEIBO_TAP_MAX_MOVEMENT)
   }
 
   @Builder
@@ -510,7 +660,7 @@ export struct WeiboSearchResult {
         .padding({ left: 12, right: 12 })
         .onClick((): void => {
           this.toggleFollowUser(user);
-        })
+        }, WEIBO_TAP_MAX_MOVEMENT)
     }
     .width('100%')
     .padding(Spacing.md)
@@ -519,7 +669,7 @@ export struct WeiboSearchResult {
     .border({ width: 0.5, color: Theme.cardBorder(this.isDark) })
     .onClick((): void => {
       this.openUserProfile(user.id, user.screenName);
-    })
+    }, WEIBO_TAP_MAX_MOVEMENT)
   }
 
   @Builder
@@ -537,7 +687,7 @@ export struct WeiboSearchResult {
         .systemMaterial(ImmMaterial.control())
         .borderRadius(Radius.full)
         .accessibilityText($r('app.string.weibo_back'))
-        .onClick((): void => { this.popRoute(); })
+        .onClick((): void => { this.popRoute(); }, WEIBO_TAP_MAX_MOVEMENT)
 
         Search({
           value: this.searchInput,
@@ -557,6 +707,8 @@ export struct WeiboSearchResult {
             const trimmed: string = value.trim();
             if (trimmed.length > 0) {
               this.query = trimmed;
+              this.tabSnapshots.clear();
+              this.saveSearchHistory(trimmed);
               this.executeSearch(trimmed, 1, false);
             }
           })
@@ -574,15 +726,25 @@ export struct WeiboSearchResult {
           const trimmed: string = this.searchInput.trim();
           if (trimmed.length > 0) {
             this.query = trimmed;
+            this.tabSnapshots.clear();
+            this.saveSearchHistory(trimmed);
             this.executeSearch(trimmed, 1, false);
           }
-        })
+        }, WEIBO_TAP_MAX_MOVEMENT)
       }
       .width('100%')
       .height(56)
       .padding({ left: Spacing.sm, right: Spacing.md })
+    }
+    .width('100%')
+    .height(56)
 
-      Scroll() {
+  }
+
+  @Builder
+  SearchCategoryBar() {
+    Column() {
+      Scroll(this.categoryScroller) {
         Row({ space: Spacing.xs }) {
           ForEach(this.tabs, (tab: string, index: number): void => {
             Button(tab)
@@ -595,7 +757,7 @@ export struct WeiboSearchResult {
               .borderRadius(Radius.full)
               .onClick((): void => {
                 this.switchTab(index);
-              })
+              }, WEIBO_TAP_MAX_MOVEMENT)
           }, (tab: string): string => tab)
         }
         .padding({ left: Spacing.sm, right: Spacing.sm, bottom: 6 })
@@ -604,6 +766,9 @@ export struct WeiboSearchResult {
       .scrollBar(BarState.Off)
       .width('100%')
     }
+    .width('100%')
+    .height(34)
+
   }
 
   @Builder
@@ -663,7 +828,7 @@ export struct WeiboSearchResult {
 
             if (this.moreError.length > 0) {
               Text(this.moreError).fontSize(fs(13, this.fontScale)).fontColor(Theme.danger())
-              Button('重试加载更多').height(44).onClick((): void => { this.loadMore(); })
+              Button('重试加载更多').height(44).onClick((): void => { this.loadMore(); }, WEIBO_TAP_MAX_MOVEMENT)
             }
             if (this.isLoadingMore) {
               Row({ space: Spacing.sm }) {
@@ -697,6 +862,8 @@ export struct WeiboSearchResult {
       .height('100%')
       .scrollBar(BarState.Off)
       .edgeEffect(EdgeEffect.Spring)
+      .translate({ x: this.tabDragOffset })
+      .animation({ duration: this.tabDragging ? 0 : 180, curve: Curve.EaseOut })
       .onScrollEdge((edge: Edge): void => {
         if (edge === Edge.Bottom) {
           this.loadMore();
@@ -709,6 +876,30 @@ export struct WeiboSearchResult {
     })
     .width('100%')
     .height('100%')
+    .clip(true)
+    .onTouch((event: TouchEvent): void => {
+      this.tabTouchTracker.track(event);
+      if (event.type === TouchType.Cancel) { this.resetTabDrag(); }
+    })
+    .gesture(
+      PanGesture({ fingers: 1, direction: PanDirection.Horizontal, distance: 12 })
+        .tag('weibo-tab-swipe')
+        .onActionStart((): void => {
+          this.tabTouchTracker.claim();
+          this.tabDragging = true;
+        })
+        .onActionUpdate((event: GestureEvent): void => {
+          this.tabDragOffset = this.tabTouchTracker.update(event, this.currentTab > 0, this.currentTab < this.tabs.length - 1);
+        })
+        .onActionEnd((event: GestureEvent): void => { this.onSearchTabPanEnd(event); })
+        .onActionCancel((): void => {
+          this.tabTouchTracker.cancel();
+          this.resetTabDrag();
+        })
+    )
+    .onGestureJudgeBegin((info: GestureInfo, event: BaseGestureEvent): GestureJudgeResult => {
+      return this.tabTouchTracker.judge(info, event, true);
+    })
   }
 
   build() {
@@ -726,6 +917,7 @@ export struct WeiboSearchResult {
       avoidLayoutSafeArea: true,
       content: {
         stackBuilder: (): void => this.SearchTitleBar(),
+        bottomBuilder: { builder: (): void => this.SearchCategoryBar() },
         divider: { showType: DividerShowType.OFF }
       },
       style: {

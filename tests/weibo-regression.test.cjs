@@ -52,7 +52,8 @@ function serviceHarness() {
   const calls = [];
   const auth = {
     getCookie: () => cookie, hasCookie: () => cookie.includes('SUB='), getSessionRevision: () => revision,
-    assertSession(r) { if (r !== revision) throw new Error('账号会话已变更'); }
+    assertSession(r) { if (r !== revision) throw new Error('账号会话已变更'); },
+    setCurrentUserId: () => Promise.resolve(), getCurrentUserId: () => ''
   };
   const http = {};
   for (const method of ['get', 'getDesktop', 'postForm']) {
@@ -112,6 +113,32 @@ test('comment photos merge mobile and desktop metadata without duplicates', () =
   assert.deepEqual(Array.from(comment.replies[0].pictures), [url]);
   assert.equal(service.toComment({ text: 'plain comment', url_struct: [{}] }).pictures.length, 0);
 });
+
+test('comment pictures upgrade http to https and extract from diverse comment formats', () => {
+  const { service } = serviceHarness();
+  
+  // 1. http is upgraded to https
+  const httpComment = service.toComment({
+    text: 'test',
+    pic: 'http://wx1.sinaimg.cn/large/photo.jpg'
+  });
+  assert.deepEqual(Array.from(httpComment.pictures), ['https://wx1.sinaimg.cn/large/photo.jpg']);
+
+  // 2. url_struct with url_title: '评论配图'
+  const titleComment = service.toComment({
+    text: 'test 评论配图',
+    url_struct: [{ url_title: '评论配图', long_url: 'http://wx2.sinaimg.cn/large/photo2.jpg' }]
+  });
+  assert.deepEqual(Array.from(titleComment.pictures), ['https://wx2.sinaimg.cn/large/photo2.jpg']);
+  assert.equal(titleComment.text, 'test');
+
+  // 3. HTML text with <a href="...">评论配图</a> strips anchor and extracts picture if empty
+  const htmlComment = service.toComment({
+    text: 'V680也豪华感十足 <a href="http://wx3.sinaimg.cn/large/car.jpg">评论配图</a>'
+  });
+  assert.equal(htmlComment.text, 'V680也豪华感十足');
+  assert.deepEqual(Array.from(htmlComment.pictures), ['https://wx3.sinaimg.cn/large/car.jpg']);
+});
 test('publish uses documented update endpoint and comma-separated uploaded picId', async () => {
   const h = serviceHarness(); await h.service.publishPost(' hello ', ['p1', 'p2']);
   assert.equal(h.calls[0].url, 'https://m.weibo.cn/api/statuses/update');
@@ -163,6 +190,34 @@ test('remembered post and comment caches do not survive session changes', async 
   h.respond({ ok: 1, data: [], max_id: 0 }); await h.service.fetchComments('p', 1);
   h.switchAccount(); assert.equal(h.service.getRememberedPost('p'), null);
   await h.service.fetchComments('p', 1); assert.equal(h.calls.length, 2);
+});
+test('WeiboService remembers multiple recent posts in LRU cache and caches current user profile', async () => {
+  const h = serviceHarness();
+  h.service.rememberPost({ id: 'p1', text: 'first' });
+  h.service.rememberPost({ id: 'p2', text: 'second' });
+  h.service.rememberPost({ id: 'p3', text: 'third' });
+
+  // All recent posts are retrievable, not just the latest one
+  assert.equal(h.service.getRememberedPost('p1')?.text, 'first');
+  assert.equal(h.service.getRememberedPost('p2')?.text, 'second');
+  assert.equal(h.service.getRememberedPost('p3')?.text, 'third');
+  assert.equal(h.service.getRememberedPost('unknown'), null);
+
+  // Current user cache
+  assert.equal(h.service.getCachedCurrentUser(), null);
+  const responses = [
+    { ok: 1, data: { login: true, uid: '123' } },
+    { ok: 1, data: { userInfo: { id: '123', screen_name: 'testuser', profile_image_url: 'avatar' } } }
+  ];
+  h.respond(() => JSON.stringify(responses.shift() || { ok: 1, data: {} }));
+  const user = await h.service.fetchCurrentUserProfile();
+  assert.equal(user.screenName, 'testuser');
+  assert.equal(h.service.getCachedCurrentUser()?.screenName, 'testuser');
+
+  // Account switch clears user cache and post cache
+  h.switchAccount();
+  assert.equal(h.service.getCachedCurrentUser(), null);
+  assert.equal(h.service.getRememberedPost('p1'), null);
 });
 test('old in-flight post cannot populate a new session cache', async () => {
   const h = serviceHarness(); let finish;
@@ -382,7 +437,7 @@ test('home media and card actions do not block ancestor scrolling hit tests', ()
   assert.match(cards, /this\.openUserProfile\(post\.userId, post\.userName\)/);
   assert.match(cards, /this\.toggleLike\(post, !post\.isLiked\)/);
   assert.match(cards, /this\.openOriginalPost\(post\)/);
-  assert.match(cards, /\.onClick\(\(\): void => \{ this\.openPost\(post\); \}\)/);
+  assert.match(cards, /\.onClick\(\(\): void => \{ this\.openPost\(post\); \}, WEIBO_TAP_MAX_MOVEMENT\)/);
 });
 
 function homeRefreshHarness() {
@@ -392,7 +447,8 @@ function homeRefreshHarness() {
   const method = src.slice(start, end).replace('private async refreshFeed(): Promise<void>', 'async refreshFeed()');
   const Controller = vm.runInNewContext('(class { ' + method + ' })');
   const instance = new Controller(); instance.refreshing = true; instance.refreshInFlight = false;
-  instance.pageScroller = { scrollTo() {} }; return instance;
+  instance.posts = []; instance.scheduleSavePosition = () => {};
+  instance.pageScroller = { scrollTo() {}, scrollToIndex() {}, scrollEdge() {} }; return instance;
 }
 test('pull refresh starts even when native two-way binding has already set refreshing=true', async () => {
   const instance = homeRefreshHarness(); let calls = 0;
@@ -446,6 +502,7 @@ function detailHarness(fetchComments, extraMethods = []) {
     'isCurrentSession', 'isCurrentCommentRequest', 'isCurrentReplyRequest', 'reconcileCommentLike', 'applyConcurrentCommentLikes',
     'loadComments', 'loadMoreComments', 'switchCommentSort', ...extraMethods
   ], { WeiboAuthManager: { getInstance: () => auth }, WeiboService: { getInstance: () => service },
+    hilog: { info() {} },
     WeiboCommentSort: { Hot: 0, Latest: 1 }, Haptic: { light() {} }, $r: id => id,
     Curve: { EaseOut: 0 }, ScrollState: { Scroll: 1, Fling: 2 } });
   Object.assign(instance, { postId: 'p', comments: [], commentsSort: 0, commentsEpoch: 0, commentsPage: 1,
@@ -580,7 +637,7 @@ test('native detail source defaults to heat and binds an immersive multiline edi
   assert.ok(src.includes("backgroundColor('#66000000')"));
   // 回复入口：点击评论本身进入回复，不再有独立「回复」按钮（用户明确要求）
   assert.ok(!src.includes("Button('回复')"), '评论项不应再有独立回复按钮');
-  assert.ok(src.includes('.onClick((): void => { this.beginCommentReply(comment); })'),
+  assert.ok(src.includes('.onClick((): void => { this.beginCommentReply(comment); }, WEIBO_TAP_MAX_MOVEMENT)'),
     '点击评论本身应进入回复');
   assert.ok(src.includes('accessibilityText(`回复 ${comment.userName}`)'),
     '评论项需保留可访问的回复语义');

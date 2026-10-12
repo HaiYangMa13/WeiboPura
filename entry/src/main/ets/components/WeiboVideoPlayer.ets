@@ -156,6 +156,16 @@ export struct WeiboVideoPlayer {
           this.failed = true;
           this.playing = false;
         })
+        .onVisibleAreaChange([0.0], (isVisible: boolean, _currentRatio: number): void => {
+          if (!isVisible && this.playing) {
+            try {
+              this.controller.pause();
+            } catch (_err) {}
+            this.playing = false;
+            this.showControls = true;
+            this.clearHideTimer();
+          }
+        })
 
       // Gesture tap area
       Row()

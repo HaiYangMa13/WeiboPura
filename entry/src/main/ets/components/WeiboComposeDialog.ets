@@ -1,7 +1,8 @@
 import { ImmBlur, ImmMaterial, Radius, Spacing, Theme, fs, isDarkMode } from '../common/Theme';
-import { WeiboPost } from '../model/WeiboModel';
+import { WeiboPost, WeiboUser } from '../model/WeiboModel';
 import { WeiboService } from '../service/WeiboService';
 import { WeiboAuthManager } from '../service/WeiboAuthManager';
+import { WeiboDraftManager } from '../service/WeiboDraftManager';
 import { Haptic } from '../common/Haptic';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { WeiboEmojiPanel } from './WeiboEmojiPanel';
@@ -25,9 +26,53 @@ export struct WeiboComposeDialog {
   private uploadRevision: number = -1;
   @StorageLink('fontScale') fontScale: number = 1.0;
 
-  aboutToAppear(): void {
-    if (this.mode === 'repost' && this.targetPost !== null) {
-      this.content = '';
+  private currentAccountKey(): string {
+    if (WeiboAuthManager.getInstance().hasCookie()) {
+      const user: WeiboUser | null = WeiboService.getInstance().getCachedCurrentUser();
+      if (user !== null && user.id.length > 0) {
+        return user.id;
+      }
+      const targetId: string = WeiboAuthManager.getInstance().getTargetUserId();
+      return targetId.length > 0 ? targetId : 'logged_in';
+    }
+    return 'guest';
+  }
+
+  private currentDraftId(): string {
+    return this.mode === 'publish' ? 'publish' : (`repost_${this.targetPost?.id ?? 'unknown'}`);
+  }
+
+  private autoSaveDraft(): void {
+    const accountKey: string = this.currentAccountKey();
+    const draftId: string = this.currentDraftId();
+    if (this.content.trim().length === 0 && this.selectedImages.length === 0) {
+      WeiboDraftManager.getInstance().deleteDraft(accountKey, draftId);
+      return;
+    }
+    WeiboDraftManager.getInstance().saveDraft({
+      id: draftId,
+      type: this.mode,
+      accountKey: accountKey,
+      text: this.content,
+      images: this.selectedImages,
+      targetPostId: this.targetPost?.id,
+      dualComment: this.dualComment,
+      updatedAt: Date.now()
+    });
+  }
+
+  async aboutToAppear(): Promise<void> {
+    const accountKey: string = this.currentAccountKey();
+    const draftId: string = this.currentDraftId();
+    const draft = await WeiboDraftManager.getInstance().getDraft(accountKey, draftId);
+    if (draft !== null && this.content.trim().length === 0) {
+      this.content = draft.text;
+      if (draft.images && draft.images.length > 0 && this.selectedImages.length === 0) {
+        this.selectedImages = draft.images;
+      }
+      if (draft.dualComment !== undefined) {
+        this.dualComment = draft.dualComment;
+      }
     }
   }
 
@@ -43,6 +88,7 @@ export struct WeiboComposeDialog {
       const next: string[] = this.selectedImages.slice();
       for (const uri of result.photoUris) { if (!next.includes(uri)) { next.push(uri); } }
       this.selectedImages = next.slice(0, 9);
+      this.autoSaveDraft();
     } catch (_error) {
       this.getUIContext().getPromptAction().showToast({ message: '选图未完成，请重试' });
     } finally { this.pickingImages = false; }
@@ -101,6 +147,8 @@ export struct WeiboComposeDialog {
         auth.assertSession(revision);
         this.getUIContext().getPromptAction().showToast({ message: '微博发布成功' });
       }
+      const accountKey: string = this.currentAccountKey();
+      await WeiboDraftManager.getInstance().deleteDraft(accountKey, this.currentDraftId());
       this.onSuccess();
       this.controller.close();
     } catch (e) {
@@ -110,6 +158,38 @@ export struct WeiboComposeDialog {
       this.submitting = false;
       this.uploadHint = '';
     }
+  }
+
+  private handleClose(): void {
+    if (this.submitting) {
+      return;
+    }
+    if (this.content.trim().length > 0 || this.selectedImages.length > 0) {
+      this.getUIContext().showAlertDialog({
+        title: '提示',
+        message: '当前有未发布的微博内容，是否退出？',
+        primaryButton: {
+          value: '保存草稿',
+          action: (): void => {
+            this.autoSaveDraft();
+            this.controller.close();
+          }
+        },
+        secondaryButton: {
+          value: '放弃内容',
+          fontColor: Theme.danger(),
+          action: (): void => {
+            const accountKey: string = this.currentAccountKey();
+            WeiboDraftManager.getInstance().deleteDraft(accountKey, this.currentDraftId());
+            this.content = '';
+            this.selectedImages = [];
+            this.controller.close();
+          }
+        }
+      });
+      return;
+    }
+    this.controller.close();
   }
 
   build() {
@@ -128,12 +208,12 @@ export struct WeiboComposeDialog {
             .fontSize(fs(16, this.fontScale))
             .fontColor([Theme.textSecondary(this.isDark)])
         }
-        .width(32)
-        .height(32)
+        .width(44)
+        .height(44)
         .backgroundColor(Color.Transparent)
         .enabled(!this.submitting)
         .onClick((): void => {
-          this.controller.close();
+          this.handleClose();
         })
       }
       .width('100%')
@@ -170,6 +250,7 @@ export struct WeiboComposeDialog {
         .enabled(!this.submitting)
         .onChange((val: string): void => {
           this.content = val;
+          this.autoSaveDraft();
         })
 
       if (this.mode === 'publish') {

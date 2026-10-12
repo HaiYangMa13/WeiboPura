@@ -1,5 +1,7 @@
 import { WeiboPost, WeiboUser } from '../model/WeiboModel';
 import { WeiboService } from '../service/WeiboService';
+import { common } from '@kit.AbilityKit';
+import { ShareUtil } from '../common/ShareUtil';
 import { ThreadCard, ThreadItemData } from '../components/CommonComponents';
 import { ImmMaterial, Radius, Spacing, Theme, fs, isDarkMode } from '../common/Theme';
 import { DividerShowType, HdsNavDestination, HdsNavDestinationTitleMode, ScrollEffectType, hdsMaterial } from '@kit.UIDesignKit';
@@ -37,10 +39,47 @@ export struct WeiboUserProfile {
   private profileEpoch: number = 0;
   @StorageLink('weiboAuthTick') @Watch('onWeiboAuthTick') weiboAuthTick: number = 0;
   @StorageLink('fontScale') fontScale: number = 1.0;
+  @StorageLink('weibo_sync_like') @Watch('onGlobalLikeSync') globalLikeSync: string = '';
+  @StorageLink('weibo_sync_follow') @Watch('onGlobalFollowSync') globalFollowSync: string = '';
   /** Actual system top inset, populated by EntryAbility for each window. */
   @StorageLink('weibo.status_bar_height') statusBarHeight: number = 0;
   @Consume('weiboNavStack') weiboNavStack: NavPathStack;
   private profileScroller: Scroller = new Scroller();
+
+  private onGlobalLikeSync(): void {
+    if (!this.globalLikeSync) { return; }
+    const parts: string[] = this.globalLikeSync.split(':');
+    if (parts.length >= 2) {
+      const postId: string = parts[0];
+      const liked: boolean = parts[1] === 'true';
+      let changed: boolean = false;
+      const updated: WeiboPost[] = this.posts.map((p: WeiboPost): WeiboPost => {
+        if (p.id === postId && p.isLiked !== liked) {
+          changed = true;
+          return withWeiboLike(p, liked);
+        }
+        return p;
+      });
+      if (changed) {
+        this.posts = updated;
+      }
+    }
+  }
+
+  private onGlobalFollowSync(): void {
+    if (!this.globalFollowSync) { return; }
+    const parts: string[] = this.globalFollowSync.split(':');
+    if (parts.length >= 2) {
+      const userId: string = parts[0];
+      const followed: boolean = parts[1] === 'true';
+      if (this.userId === userId && this.isFollowing !== followed) {
+        this.isFollowing = followed;
+        if (this.profile !== null) {
+          this.profile.following = followed;
+        }
+      }
+    }
+  }
 
   aboutToAppear(): void {
     setTimeout((): void => { this.loadRouteProfile(); }, 50);
@@ -110,6 +149,12 @@ export struct WeiboUserProfile {
     }
   }
 
+  private sharePost(post: WeiboPost): void {
+    const context: common.UIAbilityContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    ShareUtil.shareLink(this.getUIContext(), context, `https://m.weibo.cn/detail/${post.id}`,
+      post.userName, post.text);
+  }
+
   private toThreadCard(post: WeiboPost): ThreadItemData {
     const original: WeiboPost | null = post.repost;
     const mediaPost: WeiboPost = (post.pictures.length > 0 || post.videoUrl.length > 0 || original === null)
@@ -147,7 +192,8 @@ export struct WeiboUserProfile {
       return;
     }
     WeiboService.getInstance().rememberPost(post);
-    const param: WeiboPostDetailRouteParam = { postId: post.id };
+    WeiboService.getInstance().prefetchComments(post.id);
+    const param: WeiboPostDetailRouteParam = { postId: post.id, post: post };
     this.weiboNavStack.pushPath({ name: 'WeiboPostDetail', param: param });
   }
 
@@ -389,6 +435,7 @@ export struct WeiboUserProfile {
                 },
                 abstractIsLink: post.repost !== null,
                 onComment: (_id: string): void => { this.openPost(post); },
+                onShare: (): void => { this.sharePost(post); },
                 onAvatarTap: (id: string, name: string): void => { this.openMention(name, id); },
                 onTopicTap: (topic: string): void => { this.openTopic(topic); },
                 onMentionTap: (name: string): void => { this.openMention(name); },

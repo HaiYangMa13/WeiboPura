@@ -4,6 +4,7 @@ import { webview } from '@kit.ArkWeb';
 
 const COOKIE_KEY: string = 'weibo_readonly_cookie';
 const TARGET_USER_ID_KEY: string = 'weibo_target_user_id';
+const CURRENT_USER_ID_KEY: string = 'weibo_current_user_id';
 
 /** Stores the session returned after the user finishes the visible in-app Weibo login. */
 export class WeiboAuthManager {
@@ -12,6 +13,7 @@ export class WeiboAuthManager {
   private initializationTask: Promise<void> | null = null;
   private cookie: string = '';
   private targetUserId: string = '';
+  private currentUserId: string = '';
   private sessionRevision: number = 0;
   private clearing: boolean = false;
   private cleanupRequired: boolean = false;
@@ -38,9 +40,11 @@ export class WeiboAuthManager {
     await cache.init(context);
     const cookie: string = (await cache.get(COOKIE_KEY)) ?? '';
     const target: string = (await cache.get(TARGET_USER_ID_KEY)) ?? '';
+    const currentUid: string = (await cache.get(CURRENT_USER_ID_KEY)) ?? '';
     if (revision === this.sessionRevision && !this.isSessionChanging()) {
       this.cookie = cookie;
       this.targetUserId = target;
+      this.currentUserId = currentUid;
     }
     this.initialized = true;
   }
@@ -81,6 +85,21 @@ export class WeiboAuthManager {
     await task;
   }
 
+  getCurrentUserId(): string {
+    return this.currentUserId;
+  }
+
+  async setCurrentUserId(value: string): Promise<void> {
+    const clean: string = value.trim();
+    if (clean === this.currentUserId) {
+      return;
+    }
+    this.currentUserId = clean;
+    try {
+      await CacheManager.getInstance().put(CURRENT_USER_ID_KEY, clean);
+    } catch (_e) {}
+  }
+
   getTargetUserId(): string {
     return this.targetUserId;
   }
@@ -103,6 +122,7 @@ export class WeiboAuthManager {
     // writes so an older login capture cannot persist after this logout.
     this.cookie = '';
     this.targetUserId = '';
+    this.currentUserId = '';
     this.sessionRevision++;
     const revision: number = this.sessionRevision;
     this.clearing = true;
@@ -111,7 +131,7 @@ export class WeiboAuthManager {
       const failures: string[] = [];
       try {
         await CacheManager.getInstance().putManyStrict({
-          'weibo_readonly_cookie': '', 'weibo_target_user_id': ''
+          'weibo_readonly_cookie': '', 'weibo_target_user_id': '', 'weibo_current_user_id': ''
         });
       } catch (_error) { failures.push('本地登录存储清理失败'); }
       try { await webview.WebCookieManager.clearAllCookies(); }

@@ -6,6 +6,7 @@ import { WeiboUserProfileBuilder, WeiboUserProfileRouteParam } from './WeiboUser
 import { WeiboSearchResultBuilder, WeiboSearchResultRouteParam } from './WeiboSearchResult';
 import { WeiboBrowserBuilder } from './WeiboBrowser';
 import { WeiboComment, WeiboPost, WeiboUser } from '../model/WeiboModel';
+import { WeiboHistoryManager, WeiboHistoryItem } from '../service/WeiboHistoryManager';
 import { WeiboAuthManager } from '../service/WeiboAuthManager';
 import { WeiboService } from '../service/WeiboService';
 import { Breakpoint, CARD_COLUMNS_KEY, ImmBlur, ImmMaterial, Radius, Spacing, Theme, fs, isDarkMode, isLargeScreenForm, isWideFormDevice as detectWideFormDevice, overrideColumns, readColumnMode } from '../common/Theme';
@@ -50,6 +51,29 @@ class WeiboFeedDataSource implements IDataSource {
 }
 
 /** A post detail and account page with isolated authentication state. */
+function historyItemToPost(item: WeiboHistoryItem): WeiboPost {
+  const p: WeiboPost = {
+    id: item.id,
+    userId: item.userId,
+    userName: item.userName,
+    userAvatar: item.userAvatar,
+    text: item.text,
+    isLongText: false,
+    pictures: item.pictures,
+    videoUrl: '',
+    videoCoverUrl: '',
+    repostCount: 0,
+    commentCount: 0,
+    likeCount: 0,
+    source: '',
+    createdAt: '最近浏览',
+    isLiked: false,
+    isFavorited: false,
+    repost: null
+  };
+  return p;
+}
+
 @Entry
 @Component
 export struct WeiboFeed {
@@ -118,6 +142,11 @@ export struct WeiboFeed {
       if (this.userIdDraft.length === 0) {
         await this.loadCurrentAccountProfile();
       }
+      await this.loadFeed();
+      return;
+    } else if (this.feedMode === 'history') {
+      this.feedTitle = '浏览历史';
+      this.showUserIdSetup = false;
       await this.loadFeed();
       return;
     }
@@ -240,6 +269,15 @@ export struct WeiboFeed {
   private async fetchFeedPage(page: number): Promise<WeiboPost[]> {
     const service: WeiboService = WeiboService.getInstance();
     const targetUid: string = this.userIdDraft.trim().length > 0 ? this.userIdDraft.trim() : this.currentAccountId.trim();
+    if (this.feedMode === 'history') {
+      const accountKey: string = targetUid.length > 0 ? targetUid : 'guest';
+      const historyItems: WeiboHistoryItem[] = await WeiboHistoryManager.getInstance().getHistory(accountKey);
+      const posts: WeiboPost[] = [];
+      for (const item of historyItems) {
+        posts.push(historyItemToPost(item));
+      }
+      return posts;
+    }
     if (this.feedMode === 'favorites') { return service.fetchFavorites(page, targetUid); }
     if (this.feedMode === 'likes') { return service.fetchLikes(targetUid, page); }
     return service.fetchUserTimeline(targetUid, page);
@@ -352,6 +390,7 @@ export struct WeiboFeed {
       repostCount: post.repostCount,
       isLiked: liked,
       repost: post.repost,
+      hotComment: post.hotComment,
     };
   }
 
@@ -579,7 +618,8 @@ export struct WeiboFeed {
 
   private openPost(post: WeiboPost): void {
     WeiboService.getInstance().rememberPost(post);
-    const param: WeiboPostDetailRouteParam = { postId: post.id };
+    WeiboService.getInstance().prefetchComments(post.id);
+    const param: WeiboPostDetailRouteParam = { postId: post.id, post: post };
     this.weiboNavStack.pushPath({ name: 'WeiboPostDetail', param: param });
   }
 

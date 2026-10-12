@@ -103,10 +103,12 @@ export function bidToMid(bid: string): string {
   return mid;
 }
 
-/** Preserve emoji labels and short links before flattening untrusted HTML. */
+/** Preserve emoji labels, line breaks, and short links before flattening untrusted HTML. */
 export function normalizeWeiboText(html: string): string {
+  // Convert line breaks and paragraph boundaries to newlines before stripping HTML tags
+  const withLineBreaks: string = html.replace(/<br\s*\/?>/gi, '\n').replace(/<p\b[^>]*>/gi, '\n').replace(/<\/p>/gi, '\n');
   // Strip inline expand spans (e.g. <span class="expand">展开</span>)
-  const withoutExpandSpans: string = html.replace(/<span\b[^>]*>[\s\S]*?<\/span>/gi, (tag: string): string => {
+  const withoutExpandSpans: string = withLineBreaks.replace(/<span\b[^>]*>[\s\S]*?<\/span>/gi, (tag: string): string => {
     const text: string = stripHtml(tag).trim();
     if (/^(?:展开|查看全文|全文)$/i.test(text)) {
       return '';
@@ -133,11 +135,15 @@ export function normalizeWeiboText(html: string): string {
     if (label === '网页链接' && (/(?:video\.weibo\.com|weibo\.(?:com|cn)\/(?:status|detail|tv\/show))/i.test(href) || href.includes('sinaimg.cn'))) {
       return '';
     }
+    // Strip 评论配图 anchor so it does not render redundant text "评论配图 网页链接 ↗"
+    if (label === '评论配图' || label.includes('评论配图')) {
+      return '';
+    }
     const semanticLink: boolean = label.startsWith('@') || /^#[^#]+#$/.test(label);
     if (/^https?:\/\//i.test(href) && !semanticLink && !label.includes(href)) {
       return `${label.length > 0 && label !== '网页链接' ? label + ' ' : ''}${href} `;
     }
     return label;
   });
-  return stripHtml(withLinks).replace(/[\u200b\ufeff]+/g, '').trim();
+  return stripHtml(withLinks).replace(/[\u200b\ufeff]+/g, '').replace(/\s*评论配图\s*$/i, '').trim();
 }

@@ -1,10 +1,13 @@
+import { WeiboTabTouchTracker, WEIBO_TAP_MAX_MOVEMENT } from '../common/WeiboTabSwipe';
+import { WeiboDraftManager, WeiboDraftItem } from '../service/WeiboDraftManager';
+import { WeiboHistoryManager } from '../service/WeiboHistoryManager';
 import { common } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { curves, window } from '@kit.ArkUI';
-import { WeiboComment, WeiboCommentSort, WeiboPost, WeiboUser } from '../model/WeiboModel';
+import { WeiboComment, WeiboCommentSort, WeiboDetailTab, WeiboLikeUser, WeiboLikesPage, WeiboPost, WeiboRepostsPage, WeiboUser } from '../model/WeiboModel';
 import { WeiboAuthManager } from '../service/WeiboAuthManager';
 import { WeiboService } from '../service/WeiboService';
-import { ImmBlur, ImmMaterial, MaterialManager, Radius, Spacing, Theme, fs, isDarkMode } from '../common/Theme';
+import { Breakpoint, ImmBlur, ImmMaterial, MaterialManager, Radius, Spacing, Theme, fs, isDarkMode, isLargeScreenForm, isPuraXMaxDevice, isWideFormDevice as detectWideFormDevice } from '../common/Theme';
 import { ShareUtil } from '../common/ShareUtil';
 import { Haptic } from '../common/Haptic';
 import { WeiboVideoPlayer } from '../components/WeiboVideoPlayer';
@@ -21,6 +24,7 @@ import { WeiboRichTextView } from '../components/WeiboRichTextView';
 import { WeiboSearchResultRouteParam } from './WeiboSearchResult';
 import { WeiboUserProfileRouteParam } from './WeiboUserProfile';
 import { WeiboComposeDialog } from '../components/WeiboComposeDialog';
+import { WeiboShareCardDialog } from '../components/WeiboShareCardDialog';
 import { WeiboEmojiPanel } from '../components/WeiboEmojiPanel';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { CommentComposerScrollState } from '../common/CommentComposerScrollState';
@@ -32,6 +36,10 @@ import { getWeiboEmoji, loadWeiboEmojiAssets } from '../common/WeiboText';
  */
 export interface WeiboPostDetailRouteParam {
   postId: string;
+  post?: WeiboPost;
+  initialTab?: WeiboDetailTab;
+  autoFocusComment?: boolean;
+  targetCommentId?: string;
 }
 
 // Pass an object literal so PostBody observes replacement of the post state.
@@ -81,6 +89,22 @@ export struct WeiboPostDetail {
   @State commentsError: string = '';
   @State commentsNoProgressPages: number = 0;
   private commentsEpoch: number = 0;
+  @State activeDetailTab: WeiboDetailTab = WeiboDetailTab.Comments;
+  @State likes: WeiboLikeUser[] = [];
+  @State likesLoading: boolean = false;
+  @State viewportWidth: number = 0;
+  @State detailViewportHeight: number = 0;
+  private readonly isWideFormDevice: boolean = detectWideFormDevice();
+  @State likesLoadingMore: boolean = false;
+  @State likesPage: number = 1;
+  @State hasMoreLikes: boolean = true;
+  @State likesError: string = '';
+  @State reposts: WeiboPost[] = [];
+  @State repostsLoading: boolean = false;
+  @State repostsLoadingMore: boolean = false;
+  @State repostsPage: number = 1;
+  @State hasMoreReposts: boolean = true;
+  @State repostsError: string = '';
   @State hasMoreComments: boolean = true;
   @State loadingMoreComments: boolean = false;
   @State replyTargetComment: WeiboComment | null = null;
@@ -143,27 +167,31 @@ export struct WeiboPostDetail {
     };
   @State videoLoadFailed: boolean = false;
 
-  async aboutToAppear(): Promise<void> {
+  private onKeyboardHeightChange = (heightPx: number): void => {
+    this.keyboardHeight = this.getUIContext().px2vp(heightPx);
+  };
+
+  aboutToAppear(): void {
     this.configureComposerDock();
     const context: common.UIAbilityContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
-    await WeiboAuthManager.getInstance().init(context);
+
+    // 1. 同步即时读取路由参数并绑定缓存微博，确保首帧立刻上屏，无需等待网络或定时器
+    this.loadRoutePostSync();
+
+    // 2. 异步准备后台资源，不阻塞正文呈现
+    WeiboAuthManager.getInstance().init(context);
     loadWeiboEmojiAssets(context);
     this.quickCommentEmojis = ['笑cry', '微笑', '泪', '害羞', '亲亲', '哈哈', '可爱']
       .filter((name: string): boolean => getWeiboEmoji(name) !== undefined);
-    await this.loadCurrentAccountProfile();
+    this.loadCurrentAccountProfile();
     this.registerGesturesShare();
     try {
       const win: window.Window | undefined = AppStorage.get<window.Window>('mainWindow');
       if (win !== undefined) {
-        win.on('keyboardHeightChange', (heightPx: number): void => {
-          this.keyboardHeight = this.getUIContext().px2vp(heightPx);
-        });
+        win.on('keyboardHeightChange', this.onKeyboardHeightChange);
       }
     } catch (_err) {
     }
-    setTimeout((): void => {
-      this.loadRoutePost();
-    }, 50);
   }
 
   aboutToDisappear(): void {
@@ -173,14 +201,66 @@ export struct WeiboPostDetail {
     try {
       const win: window.Window | undefined = AppStorage.get<window.Window>('mainWindow');
       if (win !== undefined) {
-        win.off('keyboardHeightChange');
+        win.off('keyboardHeightChange', this.onKeyboardHeightChange);
       }
     } catch (_err) {
     }
   }
 
+  private currentAccountKey(): string {
+    if (WeiboAuthManager.getInstance().hasCookie()) {
+      const user: WeiboUser | null = WeiboService.getInstance().getCachedCurrentUser();
+      if (user !== null && user.id.length > 0) {
+        return user.id;
+      }
+      const targetId: string = WeiboAuthManager.getInstance().getTargetUserId();
+      return targetId.length > 0 ? targetId : 'logged_in';
+    }
+    return 'guest';
+  }
+
+  private currentCommentDraftId(): string {
+    if (this.replyTargetComment !== null) {
+      return `reply_${this.replyTargetComment.id}`;
+    }
+    const pid: string = this.post?.id ?? this.postId;
+    return `comment_${pid}`;
+  }
+
+  private autoSaveCommentDraft(): void {
+    const draftId: string = this.currentCommentDraftId();
+    const accountKey: string = this.currentAccountKey();
+    if (this.commentDraft.trim().length === 0 && this.commentImage.length === 0) {
+      WeiboDraftManager.getInstance().deleteDraft(accountKey, draftId);
+      return;
+    }
+    WeiboDraftManager.getInstance().saveDraft({
+      id: draftId,
+      type: this.replyTargetComment !== null ? 'reply' : 'comment',
+      accountKey: accountKey,
+      text: this.commentDraft,
+      images: this.commentImage.length > 0 ? [this.commentImage] : [],
+      targetPostId: this.post?.id ?? this.postId,
+      targetCommentId: this.replyTargetComment?.id,
+      replyUserName: this.replyTargetComment?.userName,
+      updatedAt: Date.now()
+    });
+  }
+
+  private async restoreCommentDraft(): Promise<void> {
+    const draftId: string = this.currentCommentDraftId();
+    const accountKey: string = this.currentAccountKey();
+    const draft: WeiboDraftItem | null = await WeiboDraftManager.getInstance().getDraft(accountKey, draftId);
+    if (draft !== null && this.commentDraft.trim().length === 0) {
+      this.commentDraft = draft.text;
+      if (draft.images && draft.images.length > 0) {
+        this.commentImage = draft.images[0];
+      }
+    }
+  }
+
   /** HDS destinations receive their argument from the shared NavPathStack. */
-  private async loadRoutePost(): Promise<void> {
+  private loadRoutePostSync(): void {
     const params: WeiboPostDetailRouteParam[] =
       this.weiboNavStack.getParamByName('WeiboPostDetail') as WeiboPostDetailRouteParam[];
     if (params === undefined || params === null || params.length === 0) {
@@ -195,19 +275,41 @@ export struct WeiboPostDetail {
       this.errorMessage = '该微博信息暂不可用';
       return;
     }
-    const cached: WeiboPost | null = WeiboService.getInstance().getRememberedPost(this.postId);
+    this.restoreCommentDraft();
+    if (routeParam.initialTab !== undefined) {
+      this.activeDetailTab = routeParam.initialTab;
+    }
+    const cached: WeiboPost | null = routeParam.post ?? WeiboService.getInstance().getRememberedPost(this.postId);
     if (cached !== null) {
       this.post = cached;
+      try {
+        const accKey: string = (typeof this.currentAccountKey === 'function') ? this.currentAccountKey() : 'guest';
+        WeiboHistoryManager.getInstance().recordHistory(this.post, accKey);
+      } catch (_e) {}
       this.loading = false;
-      this.presentPostContent();
-      await this.prepareGestureSharePreview();
-      await this.loadComments();
+      this.contentOpacity = 1;
+      this.contentTranslateY = 0;
+      this.contentScale = 1;
+      // 延后准备手势分享截图，避免在首帧渲染时抢占 CPU/GPU
+      setTimeout((): void => {
+        this.prepareGestureSharePreview();
+      }, 1500);
+      if (this.activeDetailTab === WeiboDetailTab.Comments) {
+        this.loadComments();
+      } else if (this.activeDetailTab === WeiboDetailTab.Likes) {
+        this.loadLikes(true);
+      } else if (this.activeDetailTab === WeiboDetailTab.Reposts) {
+        this.loadReposts(true);
+      }
       if (cached.isLongText) {
         this.expandLongText();
       }
+      if (routeParam.autoFocusComment === true) {
+        setTimeout((): void => { this.openCommentEditor(); }, 250);
+      }
       return;
     }
-    await this.loadPost();
+    this.loadPost(routeParam);
   }
 
   private onWeiboAuthTick(): void {
@@ -227,6 +329,19 @@ export struct WeiboPostDetail {
     this.showCommentEmoji = false;
     this.post = null;
     this.comments = [];
+    this.activeDetailTab = WeiboDetailTab.Comments;
+    this.likes = [];
+    this.likesLoading = false;
+    this.likesLoadingMore = false;
+    this.likesPage = 1;
+    this.hasMoreLikes = true;
+    this.likesError = '';
+    this.reposts = [];
+    this.repostsLoading = false;
+    this.repostsLoadingMore = false;
+    this.repostsPage = 1;
+    this.hasMoreReposts = true;
+    this.repostsError = '';
     this.accountAvatarUrl = '';
     this.accountName = '';
     this.commentsLoading = false;
@@ -260,6 +375,12 @@ export struct WeiboPostDetail {
       this.accountName = '';
       return;
     }
+    const cachedUser: WeiboUser | null = WeiboService.getInstance().getCachedCurrentUser();
+    if (cachedUser !== null) {
+      this.accountAvatarUrl = cachedUser.avatarUrl;
+      this.accountName = cachedUser.screenName;
+      return;
+    }
     try {
       const account: WeiboUser = await WeiboService.getInstance().fetchCurrentUserProfile();
       if (!this.isCurrentSession(revision)) { return; }
@@ -272,7 +393,7 @@ export struct WeiboPostDetail {
     }
   }
 
-  private async loadPost(): Promise<void> {
+  private async loadPost(routeParam?: WeiboPostDetailRouteParam): Promise<void> {
     const revision: number = WeiboAuthManager.getInstance().getSessionRevision();
     this.loading = true;
     this.errorMessage = '';
@@ -283,18 +404,34 @@ export struct WeiboPostDetail {
       const post: WeiboPost = await WeiboService.getInstance().fetchPost(this.postId);
       if (!this.isCurrentSession(revision)) { return; }
       this.post = post;
+      // 正文数据到达后立即解除全屏 loading，让正文第一时间完成平滑上屏
+      this.loading = false;
+      try {
+        const accKey: string = (typeof this.currentAccountKey === 'function') ? this.currentAccountKey() : 'guest';
+        WeiboHistoryManager.getInstance().recordHistory(this.post, accKey);
+      } catch (_e) {}
       this.presentPostContent();
-      await this.prepareGestureSharePreview();
-      if (!this.isCurrentSession(revision)) { return; }
-      await this.loadComments();
       if (this.post !== null && this.post.isLongText) {
         this.expandLongText();
+      }
+      setTimeout((): void => {
+        this.prepareGestureSharePreview();
+      }, 1500);
+      if (!this.isCurrentSession(revision)) { return; }
+      if (this.activeDetailTab === WeiboDetailTab.Comments) {
+        this.loadComments();
+      } else if (this.activeDetailTab === WeiboDetailTab.Likes) {
+        this.loadLikes(true);
+      } else if (this.activeDetailTab === WeiboDetailTab.Reposts) {
+        this.loadReposts(true);
+      }
+      if (routeParam && routeParam.autoFocusComment === true) {
+        setTimeout((): void => { this.openCommentEditor(); }, 250);
       }
     } catch (error) {
       if (!this.isCurrentSession(revision)) { return; }
       this.errorMessage = (error as Error).message ?? '帖子详情加载失败，请稍后重试';
-    } finally {
-      if (this.isCurrentSession(revision)) { this.loading = false; }
+      this.loading = false;
     }
   }
 
@@ -339,8 +476,127 @@ export struct WeiboPostDetail {
     const service: WeiboService = WeiboService.getInstance();
     service.rememberPost(original);
     service.prefetchComments(original.id);
-    const param: WeiboPostDetailRouteParam = { postId: original.id };
+    const param: WeiboPostDetailRouteParam = { postId: original.id, post: original };
     this.weiboNavStack.pushPath({ name: 'WeiboPostDetail', param: param });
+  }
+
+  @State tabDragOffset: number = 0;
+  @State tabDragging: boolean = false;
+  private tabTouchTracker: WeiboTabTouchTracker = new WeiboTabTouchTracker('detail');
+
+  private resetTabDrag(): void {
+    this.tabDragging = false;
+    this.tabDragOffset = 0;
+  }
+
+  private onDetailTabPanEnd(event: GestureEvent): void {
+    const direction: number = this.tabTouchTracker.finish(event);
+    this.resetTabDrag();
+    if (this.commentEditorOpen || direction === 0) { return; }
+    const tabs: WeiboDetailTab[] = [WeiboDetailTab.Reposts, WeiboDetailTab.Comments, WeiboDetailTab.Likes];
+    const next: number = tabs.indexOf(this.activeDetailTab) + direction;
+    if (next >= 0 && next < tabs.length) {
+      this.switchDetailTab(tabs[next]);
+    }
+  }
+
+  private formatTabTitle(title: string, count: number): string {
+    if (count <= 0) {
+      return `${title} (0)`;
+    }
+    if (count >= 10000) {
+      return `${title} (${(count / 10000).toFixed(1)}万)`;
+    }
+    return `${title} (${count})`;
+  }
+
+  async loadLikes(reset: boolean = true): Promise<void> {
+    if (this.postId.length === 0) { return; }
+    if (reset) {
+      this.likesLoading = true;
+      this.likesError = '';
+      this.likesPage = 1;
+      this.hasMoreLikes = true;
+    } else {
+      if (this.likesLoadingMore || !this.hasMoreLikes) { return; }
+      this.likesLoadingMore = true;
+    }
+    const pageToLoad: number = reset ? 1 : this.likesPage;
+    try {
+      const pageResult: WeiboLikesPage = await WeiboService.getInstance().fetchPostLikes(this.postId, pageToLoad);
+      if (reset) {
+        this.likes = pageResult.items;
+      } else {
+        const existingIds: Set<string> = new Set(this.likes.map((u: WeiboLikeUser): string => u.id));
+        const newItems: WeiboLikeUser[] = pageResult.items.filter((u: WeiboLikeUser): boolean => !existingIds.has(u.id));
+        this.likes = this.likes.concat(newItems);
+      }
+      this.likesPage = pageResult.nextPage;
+      this.hasMoreLikes = pageResult.hasMore;
+    } catch (err) {
+      const message: string = err instanceof Error ? err.message : '点赞列表加载失败';
+      if (reset) {
+        this.likesError = message;
+      }
+    } finally {
+      this.likesLoading = false;
+      this.likesLoadingMore = false;
+    }
+  }
+
+  async loadMoreLikes(): Promise<void> {
+    if (this.likesLoading || this.likesLoadingMore || !this.hasMoreLikes) { return; }
+    await this.loadLikes(false);
+  }
+
+  async loadReposts(reset: boolean = true): Promise<void> {
+    if (this.postId.length === 0) { return; }
+    if (reset) {
+      this.repostsLoading = true;
+      this.repostsError = '';
+      this.repostsPage = 1;
+      this.hasMoreReposts = true;
+    } else {
+      if (this.repostsLoadingMore || !this.hasMoreReposts) { return; }
+      this.repostsLoadingMore = true;
+    }
+    const pageToLoad: number = reset ? 1 : this.repostsPage;
+    try {
+      const pageResult: WeiboRepostsPage = await WeiboService.getInstance().fetchPostReposts(this.postId, pageToLoad);
+      if (reset) {
+        this.reposts = pageResult.items;
+      } else {
+        const existingIds: Set<string> = new Set(this.reposts.map((p: WeiboPost): string => p.id));
+        const newItems: WeiboPost[] = pageResult.items.filter((p: WeiboPost): boolean => !existingIds.has(p.id));
+        this.reposts = this.reposts.concat(newItems);
+      }
+      this.repostsPage = pageResult.nextPage;
+      this.hasMoreReposts = pageResult.hasMore;
+    } catch (err) {
+      const message: string = err instanceof Error ? err.message : '转发列表加载失败';
+      if (reset) {
+        this.repostsError = message;
+      }
+    } finally {
+      this.repostsLoading = false;
+      this.repostsLoadingMore = false;
+    }
+  }
+
+  async loadMoreReposts(): Promise<void> {
+    if (this.repostsLoading || this.repostsLoadingMore || !this.hasMoreReposts) { return; }
+    await this.loadReposts(false);
+  }
+
+  switchDetailTab(tab: WeiboDetailTab): void {
+    if (this.activeDetailTab === tab) { return; }
+    Haptic.light();
+    this.activeDetailTab = tab;
+    if (tab === WeiboDetailTab.Likes && this.likes.length === 0 && !this.likesLoading) {
+      this.loadLikes(true);
+    } else if (tab === WeiboDetailTab.Reposts && this.reposts.length === 0 && !this.repostsLoading) {
+      this.loadReposts(true);
+    }
   }
 
   private copyPostWithText(source: WeiboPost, text: string): WeiboPost {
@@ -364,6 +620,7 @@ export struct WeiboPostDetail {
       repostCount: source.repostCount,
       isLiked: source.isLiked,
       repost: source.repost,
+      hotComment: source.hotComment,
     };
   }
 
@@ -513,7 +770,8 @@ export struct WeiboPostDetail {
     this.commentEditorOpen = false;
     this.showCommentEmoji = false;
     this.commentInputFocused = false;
-    this.replyTargetComment = null;
+    // 保留 replyTargetComment 与 commentDraft、commentImage 绑定，
+    // 避免用户临时收起键盘查阅其他评论后，再次点击输入框丢失回复对象变为发根评论
     try {
       this.commentEditorController.stopEditing();
     } catch (_error) {
@@ -604,6 +862,16 @@ export struct WeiboPostDetail {
     this.expandedReplyIds = this.expandedReplyIds.filter((id: string): boolean => id !== commentId);
     this.replyLoadingIds = this.replyLoadingIds.filter((id: string): boolean => id !== commentId);
     this.replyCursors.delete(commentId);
+    this.comments = this.comments.slice();
+  }
+
+  // Nested plain comment objects are not deeply observed by @State. Rebuild only
+  // the affected thread when its reply data or pagination controls change.
+  private commentThreadKey(comment: WeiboComment): string {
+    const replies: WeiboComment[] = comment.replies ?? [];
+    const replyIds: string = replies.map((reply: WeiboComment): string => reply.id).join(',');
+    return `${comment.id}:${this.expandedReplyIds.includes(comment.id)}:${this.replyLoadingIds.includes(comment.id)}`
+      + `:${this.replyCursors.get(comment.id) ?? 'initial'}:${replyIds}`;
   }
 
   private isCurrentReplyRequest(epoch: number, revision: number, commentId: string, threadEpoch: number): boolean {
@@ -624,13 +892,21 @@ export struct WeiboPostDetail {
     const readLikeVersion: number = this.commentLikeVersion;
     this.replyEpochs.set(comment.id, threadEpoch);
     this.replyLoadingIds = this.replyLoadingIds.concat([comment.id]);
+    this.comments = this.comments.slice();
+    hilog.info(0x0001, 'FluoReplies', 'request id=%{public}s cursor=%{public}s', comment.id, cursor ?? '0');
     try {
       const page = await WeiboService.getInstance().fetchCommentReplies(comment.id, cursor ?? '0');
       if (!this.isCurrentReplyRequest(epoch, revision, comment.id, threadEpoch)) { return; }
       this.applyConcurrentCommentLikes(page.items, readLikeVersion);
       const previous: WeiboComment[] = cursor === undefined ? [] : (comment.replies ?? []);
-      comment.replies = previous.concat(page.items.filter((item: WeiboComment): boolean =>
-        !previous.some((existing: WeiboComment): boolean => existing.id === item.id)));
+      const added: WeiboComment[] = page.items.filter((item: WeiboComment): boolean =>
+        !previous.some((existing: WeiboComment): boolean => existing.id === item.id));
+      if (cursor !== undefined && page.items.length > 0 && added.length === 0 && page.nextMaxId === cursor) {
+        throw new Error('接口返回重复回复，未取得下一页，请重试');
+      }
+      comment.replies = previous.concat(added);
+      hilog.info(0x0001, 'FluoReplies', 'result id=%{public}s received=%{public}d added=%{public}d total=%{public}d more=%{public}s',
+        comment.id, page.items.length, added.length, comment.replies.length, `${page.hasMore}`);
       this.replyCursors.set(comment.id, page.hasMore ? page.nextMaxId : '0');
       if (!this.expandedReplyIds.includes(comment.id)) {
         this.expandedReplyIds = this.expandedReplyIds.concat([comment.id]);
@@ -640,7 +916,10 @@ export struct WeiboPostDetail {
       if (!this.isCurrentReplyRequest(epoch, revision, comment.id, threadEpoch)) { return; }
       this.getUIContext().getPromptAction().showToast({ message: (error as Error).message ?? '回复加载失败，请重试' });
     } finally {
-      if (this.isCurrentReplyRequest(epoch, revision, comment.id, threadEpoch)) { this.replyLoadingIds = this.replyLoadingIds.filter((id: string): boolean => id !== comment.id); }
+      if (this.isCurrentReplyRequest(epoch, revision, comment.id, threadEpoch)) {
+        this.replyLoadingIds = this.replyLoadingIds.filter((id: string): boolean => id !== comment.id);
+        this.comments = this.comments.slice();
+      }
     }
   }
 
@@ -665,6 +944,7 @@ export struct WeiboPostDetail {
       repostCount: source.repostCount,
       isLiked: liked,
       repost: source.repost,
+      hotComment: source.hotComment,
     };
   }
 
@@ -739,9 +1019,27 @@ export struct WeiboPostDetail {
       }),
       alignment: DialogAlignment.Bottom,
       customStyle: true,
+      autoCancel: false,
       offset: { dx: 0, dy: -20 }
     });
     this.repostDialogController.open();
+  }
+
+  private shareCardController: CustomDialogController | null = null;
+
+  private openShareCard(): void {
+    if (this.post === null) {
+      return;
+    }
+    this.shareCardController = new CustomDialogController({
+      builder: WeiboShareCardDialog({
+        post: this.post
+      }),
+      alignment: DialogAlignment.Center,
+      autoCancel: true,
+      customStyle: true
+    });
+    this.shareCardController.open();
   }
 
   private sharePost(): void {
@@ -977,7 +1275,7 @@ export struct WeiboPostDetail {
         MIMEType: photoAccessHelper.PhotoViewMIMETypes.IMAGE_TYPE, maxSelectNumber: 1
       });
       if (!this.isCurrentSession(revision)) { return; }
-      if (result.photoUris.length > 0) { this.commentImage = result.photoUris[0]; this.commentPictureId = ''; }
+      if (result.photoUris.length > 0) { this.commentImage = result.photoUris[0]; this.commentPictureId = ''; this.autoSaveCommentDraft(); }
     } catch (_error) {
       this.getUIContext().getPromptAction().showToast({ message: '选图未完成，请重试' });
     } finally {
@@ -1014,6 +1312,12 @@ export struct WeiboPostDetail {
       this.closeCommentEditor();
       Haptic.light();
       this.replyTargetComment = null;
+      try {
+        const accKey: string = (typeof this.currentAccountKey === 'function') ? this.currentAccountKey() : 'guest';
+        const draftKey: string = (typeof this.currentCommentDraftId === 'function') ? this.currentCommentDraftId() : `comment_${postId}`;
+        WeiboDraftManager.getInstance().deleteDraft(accKey, draftKey);
+      } catch (_e) {
+      }
       await this.loadComments(true);
       this.getUIContext().getPromptAction().showToast({ message: $r('app.string.weibo_comment_success') });
     } catch (error) {
@@ -1034,16 +1338,69 @@ export struct WeiboPostDetail {
     return count === 2 || count === 4 ? 2 : 3;
   }
 
+  private maxContentWidth(): number {
+    if (this.viewportWidth <= 0) {
+      return 320;
+    }
+    const cardWidth: number = Math.min(this.viewportWidth - 24, 840);
+    return Math.max(200, cardWidth - 32);
+  }
+
+  private isLargeScreen(): boolean {
+    return this.viewportWidth >= Breakpoint.sm;
+  }
+
+  private pictureGap(): number {
+    return this.maxContentWidth() >= 480 ? Spacing.sm : Spacing.xs;
+  }
+
+  private pictureCellWidth(pictures: string[]): number {
+    const count: number = this.visiblePictureCount(pictures);
+    const maxW: number = this.maxContentWidth();
+    const gap: number = this.pictureGap();
+    if (count === 2 || count === 4) {
+      const targetW: number = Math.min(maxW, 360);
+      return Math.floor((targetW - gap) / 2);
+    }
+    const targetW: number = Math.min(maxW, 544);
+    return Math.floor((targetW - gap * 2) / 3);
+  }
+
   private pictureCellHeight(pictures: string[]): number {
     const count: number = this.visiblePictureCount(pictures);
-    return count === 2 || count === 4 ? 150 : 106;
+    const cellW: number = this.pictureCellWidth(pictures);
+    if (count === 3) {
+      return Math.min(240, Math.round(cellW * 4 / 3));
+    }
+    return cellW;
+  }
+
+  private pictureGridWidth(pictures: string[]): number {
+    const count: number = this.visiblePictureCount(pictures);
+    const gap: number = this.pictureGap();
+    const cellW: number = this.pictureCellWidth(pictures);
+    if (count === 2 || count === 4) {
+      return cellW * 2 + gap;
+    }
+    return cellW * 3 + gap * 2;
   }
 
   private pictureGridHeight(pictures: string[]): number {
     const count: number = this.visiblePictureCount(pictures);
+    const gap: number = this.pictureGap();
+    const cellH: number = this.pictureCellHeight(pictures);
+    if (count === 2) {
+      return cellH;
+    }
+    if (count === 4) {
+      return cellH * 2 + gap;
+    }
+    if (count === 3) {
+      return cellH;
+    }
     const columns: number = this.pictureColumns(pictures);
     const rows: number = Math.ceil(count / columns);
-    return rows * this.pictureCellHeight(pictures) + (rows - 1) * Spacing.sm;
+    return rows * cellH + (rows - 1) * gap;
   }
 
   private openImagePreview(urls: string[], index: number, pictureVideos: Record<string, string> = {}): void {
@@ -1082,8 +1439,32 @@ export struct WeiboPostDetail {
           .fontColor(Theme.textPrimary(this.isDark))
           .textAlign(TextAlign.Center)
 
-        // 占位对称，保持标题居中且精简顶栏
-        Row().width(44).height(44)
+        Button() {
+          SymbolGlyph($r('sys.symbol.share'))
+            .fontColor([$r('sys.color.icon_primary')])
+            .fontSize(fs(22, this.fontScale))
+        }
+        .width(44)
+        .height(44)
+        .backgroundColor(Color.Transparent)
+        .systemMaterial(ImmMaterial.control())
+        .borderRadius(Radius.full)
+        .accessibilityText($r('app.string.weibo_share'))
+        .enabled(this.post !== null)
+        .bindMenu([
+          {
+            value: '生成分享卡片',
+            action: (): void => {
+              this.openShareCard();
+            }
+          },
+          {
+            value: '分享网页链接',
+            action: (): void => {
+              this.sharePost();
+            }
+          }
+        ])
       }
       .width('100%')
       .height(64)
@@ -1107,10 +1488,11 @@ export struct WeiboPostDetail {
       Stack({ alignContent: Alignment.BottomEnd }) {
         Image(pictures[0])
           .width('100%')
-          .height(260)
-          .constraintSize({ maxWidth: 460 })
+          .height(Math.min(340, Math.round(Math.min(this.maxContentWidth(), 520) * 0.75)))
+          .constraintSize({ maxWidth: Math.min(this.maxContentWidth(), 520) })
           .objectFit(ImageFit.Cover)
           .borderRadius(Radius.md)
+          .backgroundColor(Theme.cardBorder(this.isDark))
 
         if (this.isGifOrLive(pictures[0], pictureVideos).length > 0) {
           Text(this.isGifOrLive(pictures[0], pictureVideos))
@@ -1123,8 +1505,9 @@ export struct WeiboPostDetail {
             .margin(8)
         }
       }
+      .alignSelf(ItemAlign.Start)
       .hitTestBehavior(HitTestMode.Default)
-      .onClick((): void => { this.openImagePreview(pictures, 0, pictureVideos); })
+      .onClick((): void => { this.openImagePreview(pictures, 0, pictureVideos); }, WEIBO_TAP_MAX_MOVEMENT)
     } else if (this.visiblePictureCount(pictures) > 1) {
       Grid() {
         ForEach(pictures.slice(0, this.visiblePictureCount(pictures)), (picture: string, index: number): void => {
@@ -1136,7 +1519,16 @@ export struct WeiboPostDetail {
                 .objectFit(ImageFit.Cover)
                 .borderRadius(Radius.md)
 
-              if (this.isGifOrLive(picture, pictureVideos).length > 0) {
+              if (this.visiblePictureCount(pictures) === 3) {
+                Text('长图')
+                  .fontSize(10)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor(Color.White)
+                  .backgroundColor('rgba(0, 0, 0, 0.55)')
+                  .padding({ left: 5, right: 5, top: 1, bottom: 1 })
+                  .borderRadius(3)
+                  .margin(4)
+              } else if (this.isGifOrLive(picture, pictureVideos).length > 0) {
                 Text(this.isGifOrLive(picture, pictureVideos))
                   .fontSize(10)
                   .fontWeight(FontWeight.Bold)
@@ -1148,16 +1540,17 @@ export struct WeiboPostDetail {
               }
             }
             .hitTestBehavior(HitTestMode.Default)
-            .onClick((): void => { this.openImagePreview(pictures, index, pictureVideos); })
+            .onClick((): void => { this.openImagePreview(pictures, index, pictureVideos); }, WEIBO_TAP_MAX_MOVEMENT)
           }
         }, (picture: string, index: number): string => `${index}`)
       }
       .columnsTemplate(this.pictureColumns(pictures) === 2 ? '1fr 1fr' : '1fr 1fr 1fr')
-      .columnsGap(Spacing.sm)
-      .rowsGap(Spacing.sm)
-      .width('100%')
+      .columnsGap(this.pictureGap())
+      .rowsGap(this.pictureGap())
+      .width(this.pictureGridWidth(pictures))
       .height(this.pictureGridHeight(pictures))
-      .constraintSize({ maxWidth: 460 })
+      .constraintSize({ maxWidth: this.maxContentWidth() })
+      .alignSelf(ItemAlign.Start)
       .enableScrollInteraction(false)
     }
   }
@@ -1174,7 +1567,9 @@ export struct WeiboPostDetail {
     Column({ space: Spacing.sm }) {
       WeiboRichTextView({
         text: `@${repost.userName}：${repost.text}`,
-        fontSize: fs(14, this.fontScale), lineHeight: fs(21, this.fontScale),
+        fontSize: fs(14, this.fontScale),
+        lineHeight: fs(22, this.fontScale),
+        enablePanguSpacing: true,
         fontColor: Theme.textPrimary(this.isDark),
         onTopicClick: (topic: string): void => { this.openSearchTopic(topic); },
         onMentionClick: (name: string): void => { this.openUserProfile('', name); }
@@ -1194,12 +1589,13 @@ export struct WeiboPostDetail {
       .width('100%')
       .justifyContent(FlexAlign.End)
     }
+    .alignItems(HorizontalAlign.Start)
     .width('100%')
     .padding(Spacing.md)
     .backgroundColor(Theme.brandBg(this.isDark))
     .borderRadius(Radius.md)
     .accessibilityText(`查看@${repost.userName}的原微博`)
-    .onClick((): void => { this.openOriginalPost(repost); })
+    .onClick((): void => { this.openOriginalPost(repost); }, WEIBO_TAP_MAX_MOVEMENT)
   }
 
   @Builder
@@ -1241,11 +1637,14 @@ export struct WeiboPostDetail {
       .width('100%')
       .onClick((): void => {
         this.openUserProfile(params.post.userId, params.post.userName);
-      })
+      }, WEIBO_TAP_MAX_MOVEMENT)
       WeiboRichTextView({
         text: params.post.text,
-        fontSize: fs(17, this.fontScale),
-        lineHeight: fs(27, this.fontScale),
+        fontSize: fs(16.5, this.fontScale),
+        lineHeight: fs(29, this.fontScale),
+        paragraphSpacing: 13,
+        enablePanguSpacing: true,
+        enableAutoRhythm: true,
         fontColor: Theme.textPrimary(this.isDark),
         onTopicClick: (topic: string): void => { this.openSearchTopic(topic); },
         onMentionClick: (username: string): void => { this.openUserProfile('', username); }
@@ -1269,7 +1668,7 @@ export struct WeiboPostDetail {
         .hitTestBehavior(HitTestMode.Default)
         .accessibilityText('展开微博全文')
         .enabled(!this.longTextLoading)
-        .onClick((): void => { this.expandLongText(); })
+        .onClick((): void => { this.expandLongText(); }, WEIBO_TAP_MAX_MOVEMENT)
       }
       this.VideoPlayer(params.post)
       if (params.post.pictures.length > 0) {
@@ -1278,24 +1677,8 @@ export struct WeiboPostDetail {
       if (params.post.repost !== null) {
         this.RepostCard(params.post.repost)
       }
-      Row({ space: Spacing.md }) {
-        Text(`转发 ${params.post.repostCount}`)
-          .fontSize(fs(13, this.fontScale))
-          .fontColor(Theme.textSecondary(this.isDark))
-          .layoutWeight(1)
-        Text(`评论 ${params.post.commentCount}`)
-          .fontSize(fs(13, this.fontScale))
-          .fontColor(Theme.textSecondary(this.isDark))
-          .layoutWeight(1)
-          .textAlign(TextAlign.Center)
-        Text(`${params.post.isLiked ? '♥' : '♡'} ${params.post.likeCount}`)
-          .fontSize(fs(13, this.fontScale))
-          .fontColor(Theme.brand())
-          .layoutWeight(1)
-          .textAlign(TextAlign.End)
-      }
-      .width('100%')
     }
+    .alignItems(HorizontalAlign.Start)
     .width('100%')
     .padding(Spacing.lg)
     .backgroundColor(Theme.bgCard(this.isDark))
@@ -1308,14 +1691,14 @@ export struct WeiboPostDetail {
       if (comment.userAvatar.length > 0) {
         Image(comment.userAvatar)
           .width(34).height(34).borderRadius(Radius.full).objectFit(ImageFit.Cover)
-          .onClick((): void => { this.openUserProfile(comment.userId, comment.userName); })
+          .onClick((): void => { this.openUserProfile(comment.userId, comment.userName); }, WEIBO_TAP_MAX_MOVEMENT)
       }
       Column({ space: 5 }) {
         Row() {
           Text(comment.userName)
             .fontSize(fs(13, this.fontScale)).fontWeight(FontWeight.Medium)
             .fontColor(Theme.textPrimary(this.isDark)).layoutWeight(1)
-            .onClick((): void => { this.openUserProfile(comment.userId, comment.userName); })
+            .onClick((): void => { this.openUserProfile(comment.userId, comment.userName); }, WEIBO_TAP_MAX_MOVEMENT)
           Row({ space: 4 }) {
             SymbolGlyph(comment.isLiked ? $r('sys.symbol.heart_fill') : $r('sys.symbol.heart'))
               .fontSize(fs(14, this.fontScale))
@@ -1329,7 +1712,7 @@ export struct WeiboPostDetail {
           .height(32)
           .padding({ left: 6, right: 6 })
           .hitTestBehavior(HitTestMode.Default)
-          .onClick((): void => { this.toggleCommentLike(comment); })
+          .onClick((): void => { this.toggleCommentLike(comment); }, WEIBO_TAP_MAX_MOVEMENT)
         }.width('100%')
         WeiboRichTextView({
           text: comment.text,
@@ -1349,32 +1732,267 @@ export struct WeiboPostDetail {
       // 回复入口：点击评论本身进入回复。原独立红色「回复」按钮已移除（用户明确要求）。
       // 头像 / 昵称 / 点赞 / 评论配图各自持有 onClick，会自行消费点击，
       // 因此点这些子区域不会误触发回复（同 PostCard 外层 openPost + 内层点赞按钮的既有行为）。
-      .onClick((): void => { this.beginCommentReply(comment); })
+      .onClick((): void => { this.beginCommentReply(comment); }, WEIBO_TAP_MAX_MOVEMENT)
       .accessibilityText(`回复 ${comment.userName}`)
     }.width('100%').alignItems(VerticalAlign.Top)
   }
 
   @Builder
   CommentSortButton(label: string, sort: WeiboCommentSort) {
-    Button(label).height(44).fontSize(fs(13, this.fontScale))
+    Button(label).height(34).fontSize(fs(12, this.fontScale))
       .fontWeight(this.commentsSort === sort ? FontWeight.Bold : FontWeight.Normal)
       .fontColor(this.commentsSort === sort ? Theme.brand() : Theme.textSecondary(this.isDark))
       .backgroundColor(Theme.segGlass(this.isDark, this.commentsSort === sort))
-      .borderRadius(Radius.full).padding({ left: 12, right: 12 })
+      .borderRadius(Radius.full).padding({ left: 10, right: 10 })
       .accessibilityText(`${label}${this.commentsSort === sort ? '，已选中' : ''}`)
-      .onClick((): void => { this.switchCommentSort(sort); })
+      .onClick((): void => { this.switchCommentSort(sort); }, WEIBO_TAP_MAX_MOVEMENT)
   }
 
   @Builder
-  CommentsSection() {
+  DetailTabItem(title: string, count: number, tab: WeiboDetailTab) {
+    Column({ space: 4 }) {
+      Text(this.formatTabTitle(title, count))
+        .fontSize(fs(15, this.fontScale))
+        .fontWeight(this.activeDetailTab === tab ? FontWeight.Bold : FontWeight.Normal)
+        .fontColor(this.activeDetailTab === tab ? Theme.textPrimary(this.isDark) : Theme.textSecondary(this.isDark))
+        .padding({ left: 2, right: 2, top: 4, bottom: 2 })
+      if (this.activeDetailTab === tab) {
+        Row()
+          .width(28)
+          .height(3)
+          .borderRadius(1.5)
+          .backgroundColor(Theme.brand())
+      } else {
+        Row()
+          .width(28)
+          .height(3)
+          .backgroundColor(Color.Transparent)
+      }
+    }
+    .alignItems(HorizontalAlign.Center)
+    .hitTestBehavior(HitTestMode.Default)
+    .onClick((): void => {
+      this.switchDetailTab(tab);
+    }, WEIBO_TAP_MAX_MOVEMENT)
+  }
+
+  @Builder
+  DetailTabsHeader() {
+    Row({ space: Spacing.md }) {
+      this.DetailTabItem('转发', this.post?.repostCount ?? 0, WeiboDetailTab.Reposts)
+      this.DetailTabItem('评论', this.post?.commentCount ?? 0, WeiboDetailTab.Comments)
+      this.DetailTabItem('赞', this.post?.likeCount ?? 0, WeiboDetailTab.Likes)
+      Blank().layoutWeight(1)
+      if (this.activeDetailTab === WeiboDetailTab.Comments) {
+        Row({ space: 6 }) {
+          this.CommentSortButton('热度', WeiboCommentSort.Hot)
+          this.CommentSortButton('时间', WeiboCommentSort.Latest)
+        }
+      }
+    }
+    .width('100%')
+    .alignItems(VerticalAlign.Center)
+    .padding({ bottom: Spacing.xs })
+    .border({ width: { bottom: 0.5 }, color: Theme.manualGlassBorder() })
+  }
+
+  @Builder
+  LikeUserItem(user: WeiboLikeUser) {
+    Row({ space: Spacing.md }) {
+      if (user.userAvatar.length > 0) {
+        Image(user.userAvatar)
+          .width(42)
+          .height(42)
+          .borderRadius(21)
+          .objectFit(ImageFit.Cover)
+      } else {
+        SymbolGlyph($r('sys.symbol.person'))
+          .fontSize(22)
+          .width(42)
+          .height(42)
+          .fontColor([$r('sys.color.icon_primary')])
+          .backgroundColor(Theme.segGlass(this.isDark, false))
+          .borderRadius(21)
+      }
+      Column({ space: 4 }) {
+        Row({ space: 4 }) {
+          Text(user.userName)
+            .fontSize(fs(15, this.fontScale))
+            .fontWeight(FontWeight.Medium)
+            .fontColor(Theme.textPrimary(this.isDark))
+          if (user.verified) {
+            SymbolGlyph($r('sys.symbol.checkmark_circle_fill'))
+              .fontSize(13)
+              .fontColor([user.verifiedType === 0 ? '#F59E0B' : '#3B82F6'])
+          }
+        }
+        Text(`粉丝：${user.followersCount.length > 0 ? user.followersCount : '0'}`)
+          .fontSize(fs(12, this.fontScale))
+          .fontColor(Theme.textSecondary(this.isDark))
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+    }
+    .width('100%')
+    .padding({ top: Spacing.sm, bottom: Spacing.sm })
+    .hitTestBehavior(HitTestMode.Default)
+    .onClick((): void => {
+      this.openUserProfile(user.id, user.userName);
+    }, WEIBO_TAP_MAX_MOVEMENT)
+  }
+
+  @Builder
+  LikesBody() {
+    Column({ space: Spacing.sm }) {
+      if (this.likesLoading) {
+        Row({ space: Spacing.sm }) {
+          LoadingProgress().width(18).height(18)
+          Text('正在加载点赞用户…')
+            .fontSize(fs(13, this.fontScale))
+            .fontColor(Theme.textSecondary(this.isDark))
+        }
+        .padding({ top: Spacing.md, bottom: Spacing.md })
+      } else if (this.likesError.length > 0) {
+        Text(this.likesError).fontSize(fs(13, this.fontScale)).fontColor(Theme.danger())
+        Button('重新加载点赞').height(44).backgroundColor(Color.Transparent).fontColor(Theme.brand())
+          .onClick((): void => { this.loadLikes(true); }, WEIBO_TAP_MAX_MOVEMENT)
+      } else if (this.likes.length === 0) {
+        Text('暂无点赞')
+          .fontSize(fs(13, this.fontScale))
+          .fontColor(Theme.textSecondary(this.isDark))
+          .padding({ top: Spacing.md, bottom: Spacing.md })
+      } else {
+        ForEach(this.likes, (user: WeiboLikeUser): void => {
+          Column() {
+            this.LikeUserItem(user)
+          }
+          .width('100%')
+          .border({ width: { bottom: 0.5 }, color: Theme.manualGlassBorder() })
+        }, (user: WeiboLikeUser): string => `${user.id}_${user.userName}`)
+        if (this.likesLoadingMore) {
+          LoadingProgress().width(24).height(24).margin({ top: Spacing.sm })
+        } else if (this.hasMoreLikes) {
+          Button('加载更多点赞')
+            .backgroundColor(Color.Transparent).fontColor(Theme.brand())
+            .onClick((): void => { this.loadMoreLikes(); }, WEIBO_TAP_MAX_MOVEMENT)
+        } else {
+          Text('已加载全部点赞')
+            .fontSize(12).fontColor(Theme.textSecondary(this.isDark))
+            .margin({ top: Spacing.sm })
+        }
+      }
+    }
+    .width('100%')
+  }
+
+  @Builder
+  RepostItem(repost: WeiboPost) {
+    Row({ space: Spacing.sm }) {
+      if (repost.userAvatar.length > 0) {
+        Image(repost.userAvatar)
+          .width(36)
+          .height(36)
+          .borderRadius(18)
+          .objectFit(ImageFit.Cover)
+          .onClick((): void => {
+            this.openUserProfile(repost.userId, repost.userName);
+          }, WEIBO_TAP_MAX_MOVEMENT)
+      }
+      Column({ space: 4 }) {
+        Row({ space: 4 }) {
+          Text(repost.userName)
+            .fontSize(fs(14, this.fontScale))
+            .fontWeight(FontWeight.Medium)
+            .fontColor(Theme.textPrimary(this.isDark))
+            .onClick((): void => {
+              this.openUserProfile(repost.userId, repost.userName);
+            }, WEIBO_TAP_MAX_MOVEMENT)
+          if (repost.isFollowed) {
+            Text('已关注')
+              .fontSize(fs(10.5, this.fontScale))
+              .fontColor(Theme.brand())
+              .padding({ left: 4, right: 4, top: 1, bottom: 1 })
+              .backgroundColor(Theme.brandBg(this.isDark))
+              .borderRadius(4)
+          }
+        }
+        Row({ space: 4 }) {
+          Text(repost.createdAt)
+            .fontSize(fs(11.5, this.fontScale))
+            .fontColor(Theme.textSecondary(this.isDark))
+          if (repost.source.length > 0) {
+            Text(`来自 ${repost.source}`)
+              .fontSize(fs(11.5, this.fontScale))
+              .fontColor(Theme.textSecondary(this.isDark))
+          }
+        }
+        WeiboRichTextView({
+          text: repost.text,
+          fontSize: fs(14, this.fontScale),
+          lineHeight: fs(21, this.fontScale),
+          fontColor: Theme.textPrimary(this.isDark),
+          onTopicClick: (topic: string): void => { this.openSearchTopic(topic); },
+          onMentionClick: (name: string): void => { this.openUserProfile('', name); }
+        }).width('100%')
+      }
+      .layoutWeight(1)
+      .alignItems(HorizontalAlign.Start)
+    }
+    .width('100%')
+    .padding({ top: Spacing.sm, bottom: Spacing.md })
+    .hitTestBehavior(HitTestMode.Default)
+    .onClick((): void => {
+      this.openOriginalPost(repost);
+    }, WEIBO_TAP_MAX_MOVEMENT)
+  }
+
+  @Builder
+  RepostsBody() {
+    Column({ space: Spacing.sm }) {
+      if (this.repostsLoading) {
+        Row({ space: Spacing.sm }) {
+          LoadingProgress().width(18).height(18)
+          Text('正在加载转发…')
+            .fontSize(fs(13, this.fontScale))
+            .fontColor(Theme.textSecondary(this.isDark))
+        }
+        .padding({ top: Spacing.md, bottom: Spacing.md })
+      } else if (this.repostsError.length > 0) {
+        Text(this.repostsError).fontSize(fs(13, this.fontScale)).fontColor(Theme.danger())
+        Button('重新加载转发').height(44).backgroundColor(Color.Transparent).fontColor(Theme.brand())
+          .onClick((): void => { this.loadReposts(true); }, WEIBO_TAP_MAX_MOVEMENT)
+      } else if (this.reposts.length === 0) {
+        Text('暂无转发')
+          .fontSize(fs(13, this.fontScale))
+          .fontColor(Theme.textSecondary(this.isDark))
+          .padding({ top: Spacing.md, bottom: Spacing.md })
+      } else {
+        ForEach(this.reposts, (repost: WeiboPost): void => {
+          Column() {
+            this.RepostItem(repost)
+          }
+          .width('100%')
+          .border({ width: { bottom: 0.5 }, color: Theme.manualGlassBorder() })
+        }, (repost: WeiboPost): string => repost.id)
+        if (this.repostsLoadingMore) {
+          LoadingProgress().width(24).height(24).margin({ top: Spacing.sm })
+        } else if (this.hasMoreReposts) {
+          Button('加载更多转发')
+            .backgroundColor(Color.Transparent).fontColor(Theme.brand())
+            .onClick((): void => { this.loadMoreReposts(); }, WEIBO_TAP_MAX_MOVEMENT)
+        } else {
+          Text('已加载全部转发')
+            .fontSize(12).fontColor(Theme.textSecondary(this.isDark))
+            .margin({ top: Spacing.sm })
+        }
+      }
+    }
+    .width('100%')
+  }
+
+  @Builder
+  CommentsBody() {
     Column({ space: Spacing.md }) {
-      Row({ space: 8 }) {
-        Text($r('app.string.weibo_post_comments_title'))
-          .fontSize(fs(18, this.fontScale)).fontWeight(FontWeight.Bold)
-          .fontColor(Theme.textPrimary(this.isDark)).layoutWeight(1)
-        this.CommentSortButton('按热度', WeiboCommentSort.Hot)
-        this.CommentSortButton('按实时', WeiboCommentSort.Latest)
-      }.width('100%')
       if (this.commentsLoading) {
         Row({ space: Spacing.sm }) {
           LoadingProgress().width(18).height(18)
@@ -1385,7 +2003,7 @@ export struct WeiboPostDetail {
       } else if (this.commentsError.length > 0) {
         Text(this.commentsError).fontSize(fs(13, this.fontScale)).fontColor(Theme.danger())
         Button('重新加载评论').height(44).backgroundColor(Color.Transparent).fontColor(Theme.brand())
-          .onClick((): void => { this.loadComments(true); })
+          .onClick((): void => { this.loadComments(true); }, WEIBO_TAP_MAX_MOVEMENT)
       } else if (this.comments.length === 0) {
         Text($r('app.string.weibo_no_comments'))
           .fontSize(fs(13, this.fontScale))
@@ -1409,39 +2027,88 @@ export struct WeiboPostDetail {
                   Button(this.expandedReplyIds.includes(comment.id) ? '加载更多回复' : `查看 ${comment.replyCount ?? 0} 条回复`)
                     .height(32).fontSize(fs(12, this.fontScale)).fontColor(Theme.brand())
                     .backgroundColor(Color.Transparent)
-                    .onClick((): void => { this.loadReplies(comment); })
+                    .onClick((): void => { this.loadReplies(comment); }, WEIBO_TAP_MAX_MOVEMENT)
+                } else if (this.expandedReplyIds.includes(comment.id)) {
+                  Text('已加载全部回复').fontSize(fs(12, this.fontScale))
+                    .fontColor(Theme.textSecondary(this.isDark))
                 }
                 if (this.expandedReplyIds.includes(comment.id)) {
                   Button('收起').height(32).fontSize(fs(12, this.fontScale))
                     .backgroundColor(Color.Transparent)
                     .onClick((): void => {
                       this.collapseReplies(comment.id);
-                    })
+                    }, WEIBO_TAP_MAX_MOVEMENT)
                 }
               }.padding({ left: 36 })
             }
           }.width('100%')
             .padding({ top: Spacing.sm, bottom: Spacing.md })
             .border({ width: { bottom: 0.5 }, color: Theme.manualGlassBorder() })
-        }, (comment: WeiboComment): string => comment.id)
+        }, (comment: WeiboComment): string => this.commentThreadKey(comment))
         if (this.loadingMoreComments) {
           LoadingProgress().width(24).height(24)
         } else if (this.hasMoreComments) {
           Button('加载更多评论')
             .backgroundColor(Color.Transparent).fontColor(Theme.brand())
-            .onClick((): void => { this.loadMoreComments(); })
+            .onClick((): void => { this.loadMoreComments(); }, WEIBO_TAP_MAX_MOVEMENT)
         } else {
           Text('已加载全部评论').fontSize(12).fontColor(Theme.textSecondary(this.isDark))
         }
       }
     }
     .width('100%')
+  }
+
+  @Builder
+  CommentsSection() {
+    Column({ space: Spacing.md }) {
+      this.DetailTabsHeader()
+      Column() {
+        if (this.activeDetailTab === WeiboDetailTab.Comments) {
+          this.CommentsBody()
+        } else if (this.activeDetailTab === WeiboDetailTab.Likes) {
+          this.LikesBody()
+        } else if (this.activeDetailTab === WeiboDetailTab.Reposts) {
+          this.RepostsBody()
+        }
+      }
+      .width('100%')
+      .translate({ x: this.tabDragOffset })
+      .animation({ duration: this.tabDragging ? 0 : 180, curve: Curve.EaseOut })
+    }
+    .width('100%')
     .padding(Spacing.lg)
     .backgroundColor(Theme.bgCard(this.isDark))
     .borderRadius(Radius.postCard)
     .margin({ top: Spacing.md })
+    .clip(true)
+    // Keep the swipe surface in place while the next tab loads/has no items.
+    .constraintSize({ minHeight: Math.max(240, this.detailViewportHeight - this.statusBarHeight - 64) })
     .onAreaChange((_old: Area, area: Area): void => {
       this.commentsSectionTop = Number(area.globalPosition.y) + this.detailScroller.currentOffset().yOffset;
+    })
+    .onTouch((event: TouchEvent): void => {
+      this.tabTouchTracker.track(event);
+      if (event.type === TouchType.Cancel) { this.resetTabDrag(); }
+    })
+    .gesture(
+      PanGesture({ fingers: 1, direction: PanDirection.Horizontal, distance: 12 })
+        .tag('weibo-tab-swipe')
+        .onActionStart((): void => {
+          this.tabTouchTracker.claim();
+          this.tabDragging = true;
+        })
+        .onActionUpdate((event: GestureEvent): void => {
+          this.tabDragOffset = this.tabTouchTracker.update(event, this.activeDetailTab !== WeiboDetailTab.Reposts, this.activeDetailTab !== WeiboDetailTab.Likes);
+        })
+        .onActionEnd((event: GestureEvent): void => { this.onDetailTabPanEnd(event); })
+        .onActionCancel((): void => {
+          this.tabTouchTracker.cancel();
+          this.resetTabDrag();
+        })
+    )
+    .onGestureJudgeBegin((info: GestureInfo, event: BaseGestureEvent): GestureJudgeResult => {
+      return this.tabTouchTracker.judge(info, event, !this.commentEditorOpen);
     })
   }
 
@@ -1502,7 +2169,7 @@ export struct WeiboPostDetail {
         SymbolGlyph($r('sys.symbol.square_and_pencil'))
           .fontSize(fs(16, this.fontScale))
           .fontColor([Theme.textTertiary(this.isDark)])
-        Text(this.commentDraft.length > 0 ? this.commentDraft : '说点什么...')
+        Text(this.commentDraft.length > 0 ? this.commentDraft : (this.replyTargetComment !== null ? `回复 @${this.replyTargetComment.userName}...` : '说点什么...'))
           .fontSize(fs(13.5, this.fontScale))
           .fontColor(this.commentDraft.length > 0 ? Theme.textPrimary(this.isDark) : Theme.textSecondary(this.isDark))
           .maxLines(1)
@@ -1516,7 +2183,6 @@ export struct WeiboPostDetail {
       .backgroundColor(this.isDark ? 'rgba(255, 255, 255, 0.08)' : 'rgba(0, 0, 0, 0.04)')
       .accessibilityText('写评论')
       .onClick((): void => {
-        this.replyTargetComment = null;
         this.openCommentEditor();
       })
 
@@ -1581,6 +2247,7 @@ export struct WeiboPostDetail {
         .hitTestBehavior(HitTestMode.Default)
         .accessibilityText('查看评论')
         .onClick((): void => {
+          this.activeDetailTab = WeiboDetailTab.Comments;
           this.scrollToComments();
         })
       }
@@ -1647,7 +2314,10 @@ export struct WeiboPostDetail {
           .backgroundColor(Color.Transparent)
           .padding({ left: 4, right: 4, top: 4, bottom: 2 })
           .enabled(!this.commentSending && !this.pickingCommentImage)
-          .onChange((value: string): void => { this.commentDraft = value; })
+          .onChange((value: string): void => {
+            this.commentDraft = value;
+            this.autoSaveCommentDraft();
+          })
           .onTextSelectionChange((start: number, end: number): void => {
             this.commentSelectionStart = start; this.commentSelectionEnd = end;
           })
@@ -1799,15 +2469,21 @@ export struct WeiboPostDetail {
               .alignItems(HorizontalAlign.Center)
               .margin({ top: 120 })
             } else if (this.post !== null) {
-              Column() {
-                this.PostBody({ post: this.post })
-                this.CommentsSection()
+              Row() {
+                Blank()
+                Column() {
+                  this.PostBody({ post: this.post })
+                  this.CommentsSection()
+                }
+                .width('100%')
+                .constraintSize({ maxWidth: 840 })
+                .opacity(this.contentOpacity)
+                .translate({ y: this.contentTranslateY })
+                .scale({ x: this.contentScale, y: this.contentScale })
+                .renderGroup(true)
+                Blank()
               }
               .width('100%')
-              .opacity(this.contentOpacity)
-              .translate({ y: this.contentTranslateY })
-              .scale({ x: this.contentScale, y: this.contentScale })
-              .renderGroup(true)
             }
           }
           .width('100%')
@@ -1824,9 +2500,20 @@ export struct WeiboPostDetail {
         .edgeEffect(EdgeEffect.Spring)
         .onAreaChange((_old: Area, area: Area): void => {
           this.detailViewportBottom = Number(area.globalPosition.y) + Number(area.height);
+          this.detailViewportHeight = Number(area.height);
         })
         .onDidScroll((_xOffset: number, yOffset: number, state: ScrollState): void => { this.onDetailScroll(yOffset, state); })
-        .onScrollEdge((edge: Edge): void => { if (edge === Edge.Bottom) { this.loadMoreComments(true); } })
+        .onScrollEdge((edge: Edge): void => {
+          if (edge === Edge.Bottom) {
+            if (this.activeDetailTab === WeiboDetailTab.Comments) {
+              this.loadMoreComments(true);
+            } else if (this.activeDetailTab === WeiboDetailTab.Likes) {
+              this.loadMoreLikes();
+            } else if (this.activeDetailTab === WeiboDetailTab.Reposts) {
+              this.loadMoreReposts();
+            }
+          }
+        })
         }
         .tabBar(this.BottomComposer())
       }
@@ -1879,6 +2566,9 @@ export struct WeiboPostDetail {
     .height('100%')
     .backgroundColor(Theme.bg(this.isDark))
     .expandSafeArea([SafeAreaType.KEYBOARD], [SafeAreaEdge.BOTTOM])
+    .onAreaChange((_old: Area, area: Area): void => {
+      this.viewportWidth = Number(area.width);
+    })
   }
 
   build() {

@@ -65,6 +65,11 @@ struct ImagePreview {
   /** 本次浏览允许补到的最大页码（totalPage 与会话上限取小） */
   private maxStreamPage: number = 0;
 
+  onBackPress(): boolean {
+    this.closePreview();
+    return true;
+  }
+
   onPageShow(): void {
     this.fontSizeTick++;
   }
@@ -321,6 +326,7 @@ struct ImagePreview {
         })
         .width('100%')
         .height('100%')
+        .scale({ x: this.previewScale, y: this.previewScale })
       }
 
       if (this.showControls) {
@@ -427,7 +433,6 @@ struct ImagePreview {
     .height('100%')
     .backgroundColor(Color.Black)
     .opacity(this.previewOpacity)
-    .scale({ x: this.previewScale, y: this.previewScale })
     .renderGroup(true)
   }
 
@@ -440,13 +445,14 @@ struct ImagePreview {
       return;
     }
     this.isClosing = true;
-    this.getUIContext().animateTo({ duration: 160, curve: Curve.EaseIn }, (): void => {
+    this.restoreStatusBar();
+    this.getUIContext().animateTo({ duration: 180, curve: Curve.EaseOut }, (): void => {
       this.previewOpacity = 0;
-      this.previewScale = 0.98;
+      this.previewScale = 0.96;
     });
     setTimeout((): void => {
       this.getUIContext().getRouter().back();
-    }, 160);
+    }, 180);
   }
 
   /**

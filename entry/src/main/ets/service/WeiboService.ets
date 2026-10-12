@@ -3,7 +3,7 @@ import { normalizeWeiboText, midToBid, bidToMid } from '../common/WeiboText';
 import { weiboLivePhotoTracks } from '../common/WeiboMediaMetadata';
 import { rcp } from '@kit.RemoteCommunicationKit';
 import { WeiboHttpClient } from '../network/WeiboHttpClient';
-import { WeiboComment, WeiboCommentSort, WeiboCommentsPage, WeiboHotTopic, WeiboNotification, WeiboPost, WeiboSearchCompositeResult, WeiboSearchType, WeiboSuggestion, WeiboTimelinePage, WeiboUser } from '../model/WeiboModel';
+import { WeiboComment, WeiboCommentSort, WeiboCommentsPage, WeiboDetailTab, WeiboHotTopic, WeiboLikeUser, WeiboLikesPage, WeiboNotification, WeiboPost, WeiboRepostsPage, WeiboSearchCompositeResult, WeiboSearchSuggestionBundle, WeiboSearchType, WeiboSuggestion, WeiboTimelinePage, WeiboUser } from '../model/WeiboModel';
 import { WeiboAuthManager } from './WeiboAuthManager';
 import { WeiboVisitorSession } from './WeiboVisitorSession';
 import { prepareWeiboImage, WeiboUploadImage } from './WeiboMedia';
@@ -58,6 +58,7 @@ interface WeiboResponseData {
   max_id?: string;
   realtime?: WeiboHotTopicJson[];
   hotquery?: WeiboSuggestionJson[];
+  users?: WeiboUserJson[];
 }
 
 interface WeiboHotTopicJson {
@@ -74,6 +75,7 @@ interface WeiboSuggestionJson {
   suggestion?: string;
   count?: number;
   top_flag?: number;
+  topic_flag?: number;
 }
 
 interface WeiboCardJson {
@@ -233,6 +235,9 @@ interface WeiboPostJson {
   bmiddle_pic?: string;
   thumbnail_pic?: string;
   retweeted_status?: WeiboPostJson;
+  comments?: WeiboCommentJson[];
+  hot_comments?: WeiboCommentJson[];
+  comment_summary?: WeiboCommentJson[];
 }
 
 interface WeiboRepliesResponse {
@@ -254,14 +259,17 @@ interface WeiboCommentJson {
   comments?: WeiboCommentJson[];
   total_number?: number;
   reply_comment?: WeiboCommentJson;
-  pic?: WeiboPictureJson;
-  pics?: WeiboPictureJson[];
+  pic?: WeiboPictureJson | string;
+  pics?: (WeiboPictureJson | string)[];
+  pic_ids?: string[];
+  pic_infos?: Record<string, WeiboCommentPictureInfo>;
   url_struct?: WeiboCommentPictureGroup[];
 }
 
 /** Desktop comments attach photos to URL metadata rather than mobile pic/pics. */
-interface WeiboCommentPictureGroup {
+interface WeiboCommentPictureGroup extends WeiboUrlStructJson {
   pic_ids?: string[];
+  pic_info?: WeiboCommentPictureInfo;
   pic_infos?: Record<string, WeiboCommentPictureInfo>;
 }
 
@@ -277,6 +285,9 @@ interface WeiboCommentPictureInfo extends WeiboPictureInfoJson {
 export class WeiboService {
   private static instance: WeiboService | null = null;
   private recentPost: WeiboPost | null = null;
+  private recentPosts: Map<string, WeiboPost> = new Map();
+  private static readonly MAX_RECENT_POSTS: number = 60;
+  private currentUser: WeiboUser | null = null;
   private cacheRevision: number = -1;
   /** One detail page can consume the comment request already started by its card. */
   private recentCommentsPostId: string = '';
@@ -301,6 +312,8 @@ export class WeiboService {
     this.cacheRevision = revision;
     this.commentsGeneration++;
     this.recentPost = null;
+    this.recentPosts.clear();
+    this.currentUser = null;
     this.recentComments = null;
     this.recentCommentsPostId = '';
     this.pendingComments = null;
@@ -350,6 +363,7 @@ export class WeiboService {
     form.keys = ['uid'];
     const raw: string = await WeiboHttpClient.postForm('https://m.weibo.cn/api/friendships/create', cookie, form);
     this.parseResponse(raw);
+    AppStorage.setOrCreate<string>('weibo_sync_follow', `${id}:true:${Date.now()}`);
   }
 
   async unfollowUser(userId: string): Promise<void> {
@@ -364,6 +378,7 @@ export class WeiboService {
     // ambiguous mutation failure against another endpoint.
     const raw: string = await WeiboHttpClient.postForm('https://m.weibo.cn/api/friendships/destory', cookie, form);
     this.parseResponse(raw);
+    AppStorage.setOrCreate<string>('weibo_sync_follow', `${id}:false:${Date.now()}`);
   }
 
   async fetchUserProfile(userId: string): Promise<WeiboUser> {
@@ -377,8 +392,17 @@ export class WeiboService {
     return this.toUser(user);
   }
 
+  getCachedCurrentUser(): WeiboUser | null {
+    this.syncSessionCache();
+    return this.currentUser;
+  }
+
   /** Resolve the profile, including the HD avatar, for the account in the saved Cookie. */
   async fetchCurrentUserProfile(): Promise<WeiboUser> {
+    this.syncSessionCache();
+    if (this.currentUser !== null) {
+      return this.currentUser;
+    }
     const cookie: string = this.requireAccountCookie();
     const raw: string = await WeiboHttpClient.get('https://m.weibo.cn/api/config', cookie);
     let config: WeiboConfigResponse;
@@ -393,7 +417,12 @@ export class WeiboService {
       const message: string = config.msg?.trim() ?? '';
       throw new Error(message.length > 0 ? message : '微博未接受当前登录态，请重新登录后再试');
     }
-    return await this.fetchUserProfile(uid);
+    const user: WeiboUser = await this.fetchUserProfile(uid);
+    this.currentUser = user;
+    if (user.id.length > 0 && typeof WeiboAuthManager.getInstance().setCurrentUserId === 'function') {
+      WeiboAuthManager.getInstance().setCurrentUserId(user.id).catch((): void => {});
+    }
+    return user;
   }
 
   async fetchUserTimeline(userId: string, page: number): Promise<WeiboPost[]> {
@@ -581,6 +610,7 @@ export class WeiboService {
       } else if (type === 'like') {
         titleDesc = '赞了你的微博';
       }
+      const commentIdStr: string = `${item['idstr'] ?? item['id'] ?? ''}`;
       result.push({
         id: `${type}_${rawId}`,
         senderId: senderId,
@@ -591,6 +621,7 @@ export class WeiboService {
         content: text,
         targetSnippet: targetSnippet,
         targetPostId: targetPostId,
+        targetCommentId: type === 'comment' && commentIdStr.length > 0 ? commentIdStr : undefined,
         createdAt: createdAt
       });
     }
@@ -828,15 +859,33 @@ export class WeiboService {
 
   rememberPost(post: WeiboPost): void {
     this.syncSessionCache();
+    if (post === undefined || post === null || post.id.length === 0) {
+      return;
+    }
+    if (this.recentPosts.has(post.id)) {
+      this.recentPosts.delete(post.id);
+    } else if (this.recentPosts.size >= WeiboService.MAX_RECENT_POSTS) {
+      const iter = this.recentPosts.keys().next();
+      if (!iter.done && iter.value !== undefined) {
+        this.recentPosts.delete(iter.value);
+      }
+    }
+    this.recentPosts.set(post.id, post);
     this.recentPost = post;
   }
 
   getRememberedPost(postId: string): WeiboPost | null {
     this.syncSessionCache();
-    if (this.recentPost === null || this.recentPost.id !== postId) {
-      return null;
+    if (this.recentPosts.has(postId)) {
+      const post: WeiboPost = this.recentPosts.get(postId) as WeiboPost;
+      this.recentPosts.delete(postId);
+      this.recentPosts.set(postId, post);
+      return post;
     }
-    return this.recentPost;
+    if (this.recentPost !== null && this.recentPost.id === postId) {
+      return this.recentPost;
+    }
+    return null;
   }
 
   invalidateComments(postId: string): void {
@@ -984,6 +1033,147 @@ export class WeiboService {
     return { items: items, nextMaxId: nextMaxId, hasMore: items.length > 0 && nextMaxId !== '0' && nextMaxId !== maxId };
   }
 
+  formatFollowersCount(count: string | number | undefined): string {
+    if (count === undefined || count === null || count === '') {
+      return '0';
+    }
+    const num: number = typeof count === 'number' ? count : Number(count);
+    if (isNaN(num)) {
+      return `${count}`;
+    }
+    if (num >= 100000000) {
+      return `${(num / 100000000).toFixed(1)}亿`;
+    }
+    if (num >= 10000) {
+      return `${(num / 10000).toFixed(1)}万`;
+    }
+    return `${num}`;
+  }
+
+  async fetchPostLikes(postId: string, page: number = 1): Promise<WeiboLikesPage> {
+    const auth: WeiboAuthManager = WeiboAuthManager.getInstance();
+    const revision: number = auth.getSessionRevision();
+    const cookie: string = auth.getCookie() || WeiboVisitorSession.getInstance().getCookie();
+    const id: string = postId.trim();
+    const safePage: number = page < 1 ? 1 : page;
+    if (id.length === 0) {
+      return { items: [], nextPage: 1, hasMore: false };
+    }
+
+    // 1. Try mobile attitudes endpoint
+    try {
+      const mobileUrl: string = `https://m.weibo.cn/api/attitudes/show?id=${encodeURIComponent(id)}&page=${safePage}`;
+      const rawMobile: string = await WeiboHttpClient.get(mobileUrl, cookie, `https://m.weibo.cn/detail/${encodeURIComponent(id)}`);
+      auth.assertSession(revision);
+      const parsed: Record<string, Object> = JSON.parse(rawMobile) as Record<string, Object>;
+      if (parsed['ok'] === 1 && typeof parsed['data'] === 'object' && parsed['data'] !== null) {
+        const dataObj: Record<string, Object> = parsed['data'] as Record<string, Object>;
+        const list: Record<string, Object>[] = Array.isArray(dataObj['data']) ? (dataObj['data'] as Record<string, Object>[]) : [];
+        if (list.length > 0) {
+          const items: WeiboLikeUser[] = [];
+          for (const item of list) {
+            const userObj: Record<string, Object> = (typeof item['user'] === 'object' && item['user'] !== null)
+              ? (item['user'] as Record<string, Object>)
+              : item;
+            const uid: string = `${userObj['idstr'] ?? userObj['id'] ?? ''}`;
+            const name: string = `${userObj['screen_name'] ?? userObj['name'] ?? ''}`;
+            const avatar: string = `${userObj['avatar_large'] ?? userObj['profile_image_url'] ?? ''}`;
+            const followers: string = this.formatFollowersCount(userObj['followers_count_str'] as string ?? userObj['followers_count'] as number);
+            const verified: boolean = userObj['verified'] === true;
+            const verifiedType: number | undefined = typeof userObj['verified_type'] === 'number' ? userObj['verified_type'] as number : undefined;
+            if (uid.length > 0 || name.length > 0) {
+              items.push({
+                id: uid,
+                userName: name,
+                userAvatar: avatar,
+                followersCount: followers,
+                verified: verified,
+                verifiedType: verifiedType
+              });
+            }
+          }
+          return { items: items, nextPage: safePage + 1, hasMore: items.length >= 10 };
+        }
+      }
+    } catch (_mobileError) {
+      // Fall through to desktop endpoint
+    }
+
+    // 2. Desktop fallback (ajax/statuses/likeList)
+    const desktopUrl: string = `https://weibo.com/ajax/statuses/likeList?id=${encodeURIComponent(id)}&page=${safePage}&count=20`;
+    const rawDesktop: string = await WeiboHttpClient.getDesktop(desktopUrl, cookie);
+    auth.assertSession(revision);
+    const parsedDesktop: Record<string, Object> = JSON.parse(rawDesktop) as Record<string, Object>;
+    const list: Record<string, Object>[] = Array.isArray(parsedDesktop['data']) ? (parsedDesktop['data'] as Record<string, Object>[]) : [];
+    const items: WeiboLikeUser[] = [];
+    for (const item of list) {
+      const userObj: Record<string, Object> = (typeof item['user'] === 'object' && item['user'] !== null)
+        ? (item['user'] as Record<string, Object>)
+        : item;
+      const uid: string = `${userObj['idstr'] ?? userObj['id'] ?? ''}`;
+      const name: string = `${userObj['screen_name'] ?? userObj['name'] ?? ''}`;
+      const avatar: string = `${userObj['avatar_large'] ?? userObj['profile_image_url'] ?? ''}`;
+      const followers: string = this.formatFollowersCount(userObj['followers_count_str'] as string ?? userObj['followers_count'] as number);
+      const verified: boolean = userObj['verified'] === true;
+      const verifiedType: number | undefined = typeof userObj['verified_type'] === 'number' ? userObj['verified_type'] as number : undefined;
+      if (uid.length > 0 || name.length > 0) {
+        items.push({
+          id: uid,
+          userName: name,
+          userAvatar: avatar,
+          followersCount: followers,
+          verified: verified,
+          verifiedType: verifiedType
+        });
+      }
+    }
+    return { items: items, nextPage: safePage + 1, hasMore: items.length >= 10 };
+  }
+
+  async fetchPostReposts(postId: string, page: number = 1): Promise<WeiboRepostsPage> {
+    const auth: WeiboAuthManager = WeiboAuthManager.getInstance();
+    const revision: number = auth.getSessionRevision();
+    const cookie: string = auth.getCookie() || WeiboVisitorSession.getInstance().getCookie();
+    const id: string = postId.trim();
+    const safePage: number = page < 1 ? 1 : page;
+    if (id.length === 0) {
+      return { items: [], nextPage: 1, hasMore: false };
+    }
+
+    // 1. Try mobile statuses/repostTimeline
+    try {
+      const mobileUrl: string = `https://m.weibo.cn/api/statuses/repostTimeline?id=${encodeURIComponent(id)}&page=${safePage}`;
+      const rawMobile: string = await WeiboHttpClient.get(mobileUrl, cookie, `https://m.weibo.cn/detail/${encodeURIComponent(id)}`);
+      auth.assertSession(revision);
+      const parsed: Record<string, Object> = JSON.parse(rawMobile) as Record<string, Object>;
+      if (parsed['ok'] === 1 && typeof parsed['data'] === 'object' && parsed['data'] !== null) {
+        const dataObj: Record<string, Object> = parsed['data'] as Record<string, Object>;
+        const list: WeiboPostJson[] = Array.isArray(dataObj['data']) ? (dataObj['data'] as WeiboPostJson[]) : [];
+        if (list.length > 0) {
+          const items: WeiboPost[] = [];
+          for (const status of list) {
+            items.push(this.toPost(status));
+          }
+          return { items: items, nextPage: safePage + 1, hasMore: items.length >= 10 };
+        }
+      }
+    } catch (_mobileError) {
+      // Fall through to desktop endpoint
+    }
+
+    // 2. Desktop fallback (ajax/statuses/repostTimeline)
+    const desktopUrl: string = `https://weibo.com/ajax/statuses/repostTimeline?id=${encodeURIComponent(id)}&page=${safePage}&moduleID=feed`;
+    const rawDesktop: string = await WeiboHttpClient.getDesktop(desktopUrl, cookie);
+    auth.assertSession(revision);
+    const parsedDesktop: Record<string, Object> = JSON.parse(rawDesktop) as Record<string, Object>;
+    const list: WeiboPostJson[] = Array.isArray(parsedDesktop['data']) ? (parsedDesktop['data'] as WeiboPostJson[]) : [];
+    const items: WeiboPost[] = [];
+    for (const status of list) {
+      items.push(this.toPost(status));
+    }
+    return { items: items, nextPage: safePage + 1, hasMore: items.length >= 10 };
+  }
+
   /** Like or cancel a like. This is never called automatically. */
   async setLike(postId: string, like: boolean): Promise<void> {
     const id: string = postId.trim();
@@ -998,6 +1188,7 @@ export class WeiboService {
       : 'https://weibo.com/ajax/statuses/cancelLike';
     const raw: string = await WeiboHttpClient.postForm(endpoint, cookie, form);
     this.parseResponse(raw);
+    AppStorage.setOrCreate<string>('weibo_sync_like', `${id}:${like}:${Date.now()}`);
   }
 
   async setFavorite(postId: string, favorite: boolean): Promise<void> {
@@ -1007,6 +1198,7 @@ export class WeiboService {
     form.keys = ['id'];
     const url: string = favorite ? 'https://m.weibo.cn/api/statuses/createfav' : 'https://m.weibo.cn/api/statuses/destroyfav';
     this.parseResponse(await WeiboHttpClient.postForm(url, cookie, form));
+    AppStorage.setOrCreate<string>('weibo_sync_favorite', `${postId.trim()}:${favorite}:${Date.now()}`);
   }
 
   /** Like or cancel like on a specific comment. */
@@ -1140,26 +1332,47 @@ export class WeiboService {
     return result;
   }
 
-  /** Public search autocomplete. A full result page still requires a user session. */
-  async fetchSuggestions(query: string, limit: number): Promise<WeiboSuggestion[]> {
+  /** Rich search autocomplete returning direct-matched users and query/topic suggestions. */
+  async fetchSearchSuggestions(query: string, limit: number = 10): Promise<WeiboSearchSuggestionBundle> {
     const cleanQuery: string = query.trim();
     if (cleanQuery.length === 0) {
-      return [];
+      return { users: [], suggestions: [] };
     }
     const raw: string = await WeiboHttpClient.getDesktop(
       `https://weibo.com/ajax/side/search?q=${encodeURIComponent(cleanQuery)}`);
     const response: WeiboApiResponse = this.parseResponse(raw);
-    const source: WeiboSuggestionJson[] = response.data?.hotquery ?? [];
-    const result: WeiboSuggestion[] = [];
-    const safeLimit: number = limit > 0 ? limit : source.length;
-    for (let index: number = 0; index < source.length && index < safeLimit; index++) {
-      const item: WeiboSuggestionJson = source[index];
-      const word: string = item.suggestion?.trim() ?? '';
-      if (word.length > 0) {
-        result.push({ word: word, count: item.count ?? 0, isHot: item.top_flag === 2 });
+    const sourceUsers: WeiboUserJson[] = response.data?.users ?? [];
+    const sourceQuery: WeiboSuggestionJson[] = response.data?.hotquery ?? [];
+
+    const users: WeiboUser[] = [];
+    for (let index: number = 0; index < sourceUsers.length && index < 3; index++) {
+      const u: WeiboUser = this.toUser(sourceUsers[index]);
+      if (u.id.length > 0 || u.screenName.length > 0) {
+        users.push(u);
       }
     }
-    return result;
+
+    const suggestions: WeiboSuggestion[] = [];
+    const safeLimit: number = limit > 0 ? limit : sourceQuery.length;
+    for (let index: number = 0; index < sourceQuery.length && index < safeLimit; index++) {
+      const item: WeiboSuggestionJson = sourceQuery[index];
+      const word: string = item.suggestion?.trim() ?? '';
+      if (word.length > 0) {
+        suggestions.push({
+          word: word,
+          count: item.count ?? 0,
+          isHot: item.top_flag === 2,
+          isTopic: item.topic_flag === 1
+        });
+      }
+    }
+    return { users: users, suggestions: suggestions };
+  }
+
+  /** Public search autocomplete. A full result page still requires a user session. */
+  async fetchSuggestions(query: string, limit: number): Promise<WeiboSuggestion[]> {
+    const bundle: WeiboSearchSuggestionBundle = await this.fetchSearchSuggestions(query, limit);
+    return bundle.suggestions;
   }
 
   private async get(url: string, referer?: string): Promise<string> {
@@ -1381,12 +1594,70 @@ export class WeiboService {
 
   private pushPictureUrl(pictures: string[], seen: Record<string, boolean>, url: string): void {
     const trimmed: string = url.trim();
-    const clean: string = trimmed.startsWith('//') ? `https:${trimmed}` : trimmed;
+    let clean: string = trimmed;
+    if (clean.startsWith('//')) {
+      clean = `https:${clean}`;
+    } else if (clean.startsWith('http://')) {
+      clean = `https://${clean.substring(7)}`;
+    }
     if (clean.length === 0 || seen[clean] === true) {
       return;
     }
     seen[clean] = true;
     pictures.push(clean);
+  }
+
+  private extractPictureInfoUrl(info: WeiboCommentPictureInfo | WeiboPictureInfoJson | undefined): string {
+    if (info === undefined) {
+      return '';
+    }
+    const cInfo: WeiboCommentPictureInfo = info as WeiboCommentPictureInfo;
+    const url: string = cInfo.woriginal?.url
+      || info.original?.url
+      || info.largest?.url
+      || info.mw2000?.url
+      || info.large?.url
+      || info.largecover?.url
+      || info.bmiddle?.url
+      || info.thumbnail?.url
+      || '';
+    if (url.length > 0) {
+      return url;
+    }
+    const rec: Record<string, Object> = info as Record<string, Object>;
+    if (typeof rec['url'] === 'string') {
+      return rec['url'] as string;
+    }
+    return '';
+  }
+
+  private extractPictureUrl(picture: WeiboPictureJson | string | undefined): string {
+    if (picture === undefined) {
+      return '';
+    }
+    if (typeof picture === 'string') {
+      return picture;
+    }
+    const url: string = picture.original?.url
+      || picture.largest?.url
+      || picture.mw2000?.url
+      || picture.large?.url
+      || picture.url
+      || '';
+    if (url.length > 0) {
+      return url;
+    }
+    const rec: Record<string, Object> = picture as Record<string, Object>;
+    if (typeof rec['bmiddle_pic'] === 'string') {
+      return rec['bmiddle_pic'] as string;
+    }
+    if (typeof rec['thumbnail_pic'] === 'string') {
+      return rec['thumbnail_pic'] as string;
+    }
+    if (typeof rec['pid'] === 'string' && (rec['pid'] as string).length > 0) {
+      return `https://wx1.sinaimg.cn/large/${rec['pid']}.jpg`;
+    }
+    return '';
   }
 
   /** `page_pic` is a bare url string on desktop pages and `{ url }` on mobile. */
@@ -1512,6 +1783,12 @@ export class WeiboService {
     const repostSource: WeiboPostJson | undefined = source.retweeted_status;
     const rawPostId: string | number | undefined = source.idstr ?? source.id ?? source.mid;
     const postId: string = rawPostId === undefined ? '' : `${rawPostId}`;
+    let hotComment: WeiboComment | null = null;
+    const rawComments = source.comments ?? source.hot_comments ?? source.comment_summary;
+    if (rawComments !== undefined && Array.isArray(rawComments) && rawComments.length > 0) {
+      hotComment = this.toComment(rawComments[0]);
+    }
+
     return {
       id: postId,
       userId: author.id,
@@ -1533,6 +1810,7 @@ export class WeiboService {
       isFavorited: source.favorited ?? false,
       isFollowed: author.following,
       repost: repostSource === undefined ? null : this.toPost(repostSource),
+      hotComment: hotComment,
     };
   }
 
@@ -1546,28 +1824,56 @@ export class WeiboService {
     }
     const pictures: string[] = [];
     const seen: Record<string, boolean> = {};
-    const imageSources: WeiboPictureJson[] = source.pics ?? [];
+
+    // 1. Mobile pics array
+    const imageSources: (WeiboPictureJson | string)[] = (source.pics ?? []) as (WeiboPictureJson | string)[];
     for (const image of imageSources) {
-      this.pushPictureUrl(pictures, seen, image.original?.url || image.largest?.url
-        || image.mw2000?.url || image.large?.url || image.url || '');
+      this.pushPictureUrl(pictures, seen, this.extractPictureUrl(image));
     }
+
+    // 2. Mobile single pic
     if (source.pic !== undefined) {
-      const image: WeiboPictureJson = source.pic;
-      this.pushPictureUrl(pictures, seen, image.original?.url || image.largest?.url
-        || image.mw2000?.url || image.large?.url || image.url || '');
+      this.pushPictureUrl(pictures, seen, this.extractPictureUrl(source.pic));
     }
-    for (const group of source.url_struct ?? []) {
-      const infos: Record<string, WeiboCommentPictureInfo> = group.pic_infos ?? {};
-      const orderedIds: string[] = group.pic_ids ?? [];
-      const ids: string[] = orderedIds.length > 0 ? orderedIds : Object.keys(infos);
+
+    // 3. Desktop top-level pic_infos map
+    if (source.pic_infos !== undefined) {
+      const infos: Record<string, WeiboCommentPictureInfo> = source.pic_infos;
+      const ids: string[] = source.pic_ids ?? Object.keys(infos);
       for (const id of ids) {
-        const info: WeiboCommentPictureInfo | undefined = infos[id];
-        if (info === undefined) { continue; }
-        this.pushPictureUrl(pictures, seen, info.woriginal?.url || info.original?.url
-          || info.largest?.url || info.mw2000?.url || info.large?.url
-          || info.bmiddle?.url || info.thumbnail?.url || '');
+        this.pushPictureUrl(pictures, seen, this.extractPictureInfoUrl(infos[id]));
       }
     }
+
+    // 4. Desktop url_struct metadata (both map and singular item)
+    for (const group of source.url_struct ?? []) {
+      if (group.pic_infos !== undefined) {
+        const infos: Record<string, WeiboCommentPictureInfo> = group.pic_infos;
+        const orderedIds: string[] = group.pic_ids ?? [];
+        const ids: string[] = orderedIds.length > 0 ? orderedIds : Object.keys(infos);
+        for (const id of ids) {
+          this.pushPictureUrl(pictures, seen, this.extractPictureInfoUrl(infos[id]));
+        }
+      }
+      if (group.pic_info !== undefined) {
+        this.pushPictureUrl(pictures, seen, this.extractPictureInfoUrl(group.pic_info));
+      }
+      if (group.url_title === '评论配图' || (group.long_url && group.long_url.includes('sinaimg.cn'))) {
+        this.pushPictureUrl(pictures, seen, group.long_url || group.ori_url || group.url_type_pic || '');
+      }
+    }
+
+    // 5. Fallback from HTML anchor text if <a href="...">评论配图</a> contains an image link
+    if (pictures.length === 0 && source.text) {
+      const match: RegExpMatchArray | null = source.text.match(/<a\b[^>]*href=["']([^"']+)["'][^>]*>[\s\S]*?评论配图[\s\S]*?<\/a>/i);
+      if (match !== null && match[1] !== undefined) {
+        const href: string = match[1];
+        if (href.includes('sinaimg.cn') || /\.(?:jpg|jpeg|png|webp|gif)(?:\?|$)/i.test(href)) {
+          this.pushPictureUrl(pictures, seen, href);
+        }
+      }
+    }
+
     const rawId: string | number | undefined = source.idstr ?? source.id;
     const commentId: string = rawId === undefined ? '' : `${rawId}`;
     return {

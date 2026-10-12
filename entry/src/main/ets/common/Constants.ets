@@ -108,6 +108,7 @@ export interface CacheKeys {
   FAVORITE_CUSTOM_FOLDER: string;
   FAVORITE_CUSTOM_MAPPING: string;
   SEARCH_HISTORY: string;
+  WEIBO_SEARCH_HISTORY: string;
   FAVORITE_SORT_MODE: string;
   FAVORITE_COLLECT_TS: string;
   FAVORITE_CUSTOM_THREAD_ORDER: string;
@@ -173,6 +174,7 @@ export const CACHE_KEY: CacheKeys = {
   FAVORITE_CUSTOM_FOLDER: 'favorite_custom_folder',
   FAVORITE_CUSTOM_MAPPING: 'favorite_custom_mapping',
   SEARCH_HISTORY: 'tieba_search_history',
+  WEIBO_SEARCH_HISTORY: 'weibo_search_history',
   FAVORITE_SORT_MODE: 'favorite_sort_mode',
   FAVORITE_COLLECT_TS: 'favorite_collect_ts',
   FAVORITE_CUSTOM_THREAD_ORDER: 'favorite_custom_thread_order',

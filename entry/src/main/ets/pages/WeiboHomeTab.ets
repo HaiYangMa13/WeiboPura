@@ -1,11 +1,14 @@
+import { WEIBO_TAP_MAX_MOVEMENT } from '../common/WeiboTabSwipe';
+import { WeiboReadingPositionManager, WeiboTimelinePosition } from '../service/WeiboReadingPositionManager';
 import { common } from '@kit.AbilityKit';
 import { curves } from '@kit.ArkUI';
 import { ThreadCard, ThreadItemData, ThreadSharePayload, EmptyView, ErrorView } from '../components/CommonComponents';
 import { ThreadListSkeleton } from '../components/Skeleton';
-import { Breakpoint, CARD_COLUMNS_KEY, ImmBlur, ImmMaterial, Radius, Spacing, Theme, fs, isDarkMode, isLargeScreenForm, isWideFormDevice as detectWideFormDevice, overrideColumns, readColumnMode } from '../common/Theme';
-import { WeiboPost, WeiboTimelinePage, WeiboUser } from '../model/WeiboModel';
+import { Breakpoint, CARD_COLUMNS_KEY, ImmBlur, ImmMaterial, Radius, Spacing, Theme, fs, isDarkMode, isLargeScreenForm, isPuraXMaxDevice, isWideFormDevice as detectWideFormDevice, overrideColumns, readColumnMode } from '../common/Theme';
+import { WeiboComment, WeiboDetailTab, WeiboPost, WeiboTimelinePage, WeiboUser } from '../model/WeiboModel';
 import { WeiboAuthManager } from '../service/WeiboAuthManager';
 import { WeiboService } from '../service/WeiboService';
+import { withWeiboFollow, withWeiboLike } from '../common/WeiboPostState';
 import { ShareUtil } from '../common/ShareUtil';
 import { Haptic } from '../common/Haptic';
 import { WeiboComposeDialog } from '../components/WeiboComposeDialog';
@@ -82,12 +85,54 @@ export struct WeiboHomeTab {
   /** Reserved in the scroll content, so floating host chrome never shrinks the scroll viewport. */
   @Prop topInset: number = 0;
   @Prop bottomInset: number = 116;
-  onOpenPost: (post: WeiboPost) => void = () => {};
+  onOpenPost: (post: WeiboPost, tab?: WeiboDetailTab, autoFocusComment?: boolean, targetCommentId?: string) => void = () => {};
   onOpenUserProfile: (userId: string, userName: string) => void = () => {};
   @State isDark: boolean = isDarkMode();
   @State userIdDraft: string = '';
   @State profile: WeiboUser | null = null;
   @State @Watch('onPostsChange') posts: WeiboPost[] = [];
+  @StorageLink('weibo_sync_like') @Watch('onGlobalLikeSync') globalLikeSync: string = '';
+  @StorageLink('weibo_sync_follow') @Watch('onGlobalFollowSync') globalFollowSync: string = '';
+
+  private onGlobalLikeSync(): void {
+    if (!this.globalLikeSync) { return; }
+    const parts: string[] = this.globalLikeSync.split(':');
+    if (parts.length >= 2) {
+      const postId: string = parts[0];
+      const liked: boolean = parts[1] === 'true';
+      let changed: boolean = false;
+      const updated: WeiboPost[] = this.posts.map((p: WeiboPost): WeiboPost => {
+        if (p.id === postId && p.isLiked !== liked) {
+          changed = true;
+          return this.copyPostWithLike(p, liked);
+        }
+        return p;
+      });
+      if (changed) {
+        this.posts = updated;
+      }
+    }
+  }
+
+  private onGlobalFollowSync(): void {
+    if (!this.globalFollowSync) { return; }
+    const parts: string[] = this.globalFollowSync.split(':');
+    if (parts.length >= 2) {
+      const userId: string = parts[0];
+      const followed: boolean = parts[1] === 'true';
+      let changed: boolean = false;
+      const updated: WeiboPost[] = this.posts.map((p: WeiboPost): WeiboPost => {
+        if (p.userId === userId && p.isFollowed !== followed) {
+          changed = true;
+          return withWeiboFollow(p, followed);
+        }
+        return p;
+      });
+      if (changed) {
+        this.posts = updated;
+      }
+    }
+  }
   @State timelineState: TimelineState = TimelineState.Idle;
   @State errorMessage: string = '';
   @State currentPage: number = 1;
@@ -109,6 +154,13 @@ export struct WeiboHomeTab {
   /** Device capability gate for large-screen feeds. */
   private readonly isWideFormDevice: boolean = detectWideFormDevice();
   @State timelineDataSource: WeiboPostDataSource = new WeiboPostDataSource();
+  @State newPostsAvailableCount: number = 0;
+  @State newPostsPending: WeiboPost[] = [];
+  private currentFirstVisibleIndex: number = 0;
+  private currentTopPostId: string = '';
+  private currentScrollYOffset: number = 0;
+  private isRestoringPosition: boolean = false;
+  private restoreTimeoutId: number = -1;
   @StorageLink('fontScale') fontScale: number = 1.0;
   @StorageLink('darkTick') @Watch('onDarkTick') darkTick: number = 0;
   @StorageLink('weiboAuthTick') @Watch('onWeiboAuthTick') weiboAuthTick: number = 0;
@@ -124,8 +176,12 @@ export struct WeiboHomeTab {
     this.columnMode = readColumnMode();
     this.syncCardColumns();
     if (this.mode === WeiboTimelineMode.Recommend || this.mode === WeiboTimelineMode.Following || this.userIdDraft.trim().length > 0) {
-      await this.loadFirstPage();
+      await this.initTimelineWithPosition();
     }
+  }
+
+  aboutToDisappear(): void {
+    WeiboReadingPositionManager.getInstance().flush();
   }
 
   private onDarkTick(): void {
@@ -155,9 +211,11 @@ export struct WeiboHomeTab {
   private onColumnModeTick(): void {
     this.columnMode = readColumnMode();
     this.syncCardColumns();
-    try {
-      this.pageScroller.scrollTo({ xOffset: 0, yOffset: 0 });
-    } catch (error) {
+    if (this.currentFirstVisibleIndex > 0) {
+      try {
+        this.pageScroller.scrollToIndex(this.currentFirstVisibleIndex, false, ScrollAlign.START);
+      } catch (error) {
+      }
     }
   }
 
@@ -214,6 +272,129 @@ export struct WeiboHomeTab {
     }
   }
 
+  private currentAccountKey(): string {
+    if (WeiboAuthManager.getInstance().hasCookie()) {
+      const user: WeiboUser | null = WeiboService.getInstance().getCachedCurrentUser();
+      if (user !== null && user.id.length > 0) {
+        return user.id;
+      }
+      const authUid: string = WeiboAuthManager.getInstance().getCurrentUserId();
+      if (authUid.length > 0) {
+        return authUid;
+      }
+      const targetId: string = WeiboAuthManager.getInstance().getTargetUserId();
+      return targetId.length > 0 ? targetId : 'logged_in';
+    }
+    return 'guest';
+  }
+
+  private scheduleSavePosition(): void {
+    if (this.posts.length === 0 || this.timelineState !== TimelineState.Success) {
+      return;
+    }
+    WeiboReadingPositionManager.getInstance().savePosition({
+      mode: this.mode,
+      accountKey: this.currentAccountKey(),
+      topPostId: this.currentTopPostId,
+      topIndex: this.currentFirstVisibleIndex,
+      yOffset: this.currentScrollYOffset,
+      updatedAt: Date.now(),
+      posts: this.posts,
+      currentPage: this.currentPage,
+      hasMore: this.hasMore,
+      followingMaxId: this.followingMaxId
+    });
+  }
+
+  private async initTimelineWithPosition(): Promise<void> {
+    const saved: WeiboTimelinePosition | null = await WeiboReadingPositionManager.getInstance()
+      .getPosition(this.currentAccountKey(), this.mode);
+    if (saved !== null && saved.posts.length > 0) {
+      this.isRestoringPosition = true;
+      this.posts = saved.posts;
+      this.currentPage = saved.currentPage;
+      this.hasMore = saved.hasMore;
+      if (this.mode === WeiboTimelineMode.Following && saved.followingMaxId) {
+        this.followingMaxId = saved.followingMaxId;
+      }
+      let targetIndex: number = saved.topIndex;
+      if (saved.topPostId && saved.topPostId.length > 0) {
+        const foundIndex: number = saved.posts.findIndex((p: WeiboPost): boolean => p.id === saved.topPostId);
+        if (foundIndex >= 0) {
+          targetIndex = foundIndex;
+        }
+      }
+      this.currentFirstVisibleIndex = targetIndex;
+      this.currentTopPostId = saved.topPostId;
+      this.currentScrollYOffset = saved.yOffset;
+      this.timelineState = TimelineState.Success;
+      if (typeof setTimeout !== 'undefined') {
+        this.restoreTimeoutId = setTimeout((): void => {
+          if (targetIndex > 0) {
+            try {
+              this.pageScroller.scrollToIndex(targetIndex, false, ScrollAlign.START);
+            } catch (error) {
+            }
+          }
+          this.isRestoringPosition = false;
+        }, 150);
+      } else {
+        this.isRestoringPosition = false;
+      }
+      this.checkForNewPosts();
+      return;
+    }
+    await this.loadFirstPage();
+  }
+
+  private async checkForNewPosts(): Promise<void> {
+    try {
+      let fresh: WeiboPost[] = [];
+      if (this.mode === WeiboTimelineMode.Recommend) {
+        fresh = await WeiboService.getInstance().fetchRecommendTimeline(1);
+      } else if (this.mode === WeiboTimelineMode.Following) {
+        const page: WeiboTimelinePage = await WeiboService.getInstance().fetchFollowingTimeline('0');
+        fresh = page.items;
+      }
+      if (fresh.length > 0 && this.posts.length > 0) {
+        const newItems: WeiboPost[] = fresh.filter((p: WeiboPost): boolean =>
+          !this.posts.some((existing: WeiboPost): boolean => existing.id === p.id)
+        );
+        if (newItems.length > 0) {
+          this.newPostsPending = newItems;
+          this.newPostsAvailableCount = newItems.length;
+        }
+      }
+    } catch (e) {
+      // Background check error is non-fatal
+    }
+  }
+
+  private applyNewPosts(): void {
+    if (this.newPostsPending.length > 0) {
+      const merged: WeiboPost[] = this.newPostsPending.concat(
+        this.posts.filter((p: WeiboPost): boolean => !this.newPostsPending.some((n: WeiboPost): boolean => n.id === p.id))
+      );
+      this.posts = merged;
+      this.newPostsPending = [];
+      this.newPostsAvailableCount = 0;
+      this.currentFirstVisibleIndex = 0;
+      if (this.posts.length > 0) {
+        this.currentTopPostId = this.posts[0].id;
+      }
+      this.currentScrollYOffset = 0;
+      this.timelineDataSource.data = this.posts;
+      this.timelineDataSource.reload();
+      try {
+        this.pageScroller.scrollToIndex(0, true, ScrollAlign.START);
+      } catch (error) {
+      }
+      this.scheduleSavePosition();
+    } else {
+      this.refreshFeed();
+    }
+  }
+
   private async refreshFeed(): Promise<void> {
     if (this.refreshInFlight) {
       return;
@@ -225,6 +406,12 @@ export struct WeiboHomeTab {
     } finally {
       this.refreshInFlight = false;
       this.refreshing = false;
+      this.currentFirstVisibleIndex = 0;
+      if (this.posts && this.posts.length > 0) {
+        this.currentTopPostId = this.posts[0].id;
+      }
+      this.currentScrollYOffset = 0;
+      this.scheduleSavePosition();
       if (typeof setTimeout !== 'undefined') {
         setTimeout(() => {
           try {
@@ -323,6 +510,12 @@ export struct WeiboHomeTab {
         this.currentPage = 1;
         this.hasMore = more;
         this.timelineState = result.length > 0 ? TimelineState.Success : TimelineState.Empty;
+        this.currentFirstVisibleIndex = 0;
+        if (result.length > 0) {
+          this.currentTopPostId = result[0].id;
+        }
+        this.currentScrollYOffset = 0;
+        this.scheduleSavePosition();
       } catch (error) {
         if (epoch !== this.timelineEpoch) { return; }
         this.errorMessage = (error as Error).message ?? '推荐微博加载失败，请稍后重试';
@@ -354,6 +547,12 @@ export struct WeiboHomeTab {
       this.currentPage = 1;
       this.hasMore = result.length > 0;
       this.timelineState = result.length > 0 ? TimelineState.Success : TimelineState.Empty;
+      this.currentFirstVisibleIndex = 0;
+      if (result.length > 0) {
+        this.currentTopPostId = result[0].id;
+      }
+      this.currentScrollYOffset = 0;
+      this.scheduleSavePosition();
     } catch (error) {
       if (epoch !== this.timelineEpoch) { return; }
       this.profile = null;
@@ -397,6 +596,7 @@ export struct WeiboHomeTab {
         this.posts = this.posts.concat(added);
         this.currentPage = nextPage;
         this.hasMore = more;
+        this.scheduleSavePosition();
       } else {
         this.hasMore = false;
         this.getUIContext().getPromptAction().showToast({ message: $r('app.string.weibo_empty') });
@@ -442,12 +642,12 @@ export struct WeiboHomeTab {
     };
   }
 
-  private openPost(post: WeiboPost): void {
+  private openPost(post: WeiboPost, tab?: WeiboDetailTab, autoFocusComment?: boolean, targetCommentId?: string): void {
     if (post.id.length === 0) {
       this.getUIContext().getPromptAction().showToast({ message: $r('app.string.weibo_post_unavailable') });
       return;
     }
-    this.onOpenPost(post);
+    this.onOpenPost(post, tab, autoFocusComment, targetCommentId);
   }
 
   private openOriginalPost(post: WeiboPost): void {
@@ -509,6 +709,7 @@ export struct WeiboHomeTab {
       repostCount: post.repostCount,
       isLiked: liked,
       repost: post.repost,
+      hotComment: post.hotComment,
     };
   }
 
@@ -642,12 +843,64 @@ export struct WeiboHomeTab {
     return '';
   }
 
+  private maxContentWidth(): number {
+    if (this.viewportWidth <= 0) {
+      return 320;
+    }
+    const cardWidth: number = Math.min(this.viewportWidth - 24, 840);
+    return Math.max(200, cardWidth - 32);
+  }
+
+  private isLargeScreen(): boolean {
+    return this.viewportWidth >= Breakpoint.sm;
+  }
+
+  private pictureGap(): number {
+    return this.maxContentWidth() >= 480 ? Spacing.sm : Spacing.xs;
+  }
+
+  private pictureCellWidth(count: number): number {
+    const maxW: number = this.maxContentWidth();
+    const gap: number = this.pictureGap();
+    if (count === 2 || count === 4) {
+      const targetW: number = Math.min(maxW, 360);
+      return Math.floor((targetW - gap) / 2);
+    }
+    const targetW: number = Math.min(maxW, 544);
+    return Math.floor((targetW - gap * 2) / 3);
+  }
+
+  private pictureCellHeight(count: number): number {
+    const cellW: number = this.pictureCellWidth(count);
+    if (count === 3) {
+      return Math.min(240, Math.round(cellW * 4 / 3));
+    }
+    return cellW;
+  }
+
+  private pictureGridWidth(count: number): number {
+    const gap: number = this.pictureGap();
+    const cellW: number = this.pictureCellWidth(count);
+    if (count === 2 || count === 4) {
+      return cellW * 2 + gap;
+    }
+    return cellW * 3 + gap * 2;
+  }
+
   private pictureGridHeight(count: number): number {
+    const gap: number = this.pictureGap();
+    const cellH: number = this.pictureCellHeight(count);
+    if (count === 2) {
+      return cellH;
+    }
     if (count === 4) {
-      return 236;
+      return cellH * 2 + gap;
+    }
+    if (count === 3) {
+      return cellH;
     }
     const rows: number = Math.ceil(Math.min(count, 9) / 3);
-    return rows * 108 + (rows - 1) * 4;
+    return rows * cellH + (rows - 1) * gap;
   }
 
   private sharePost(post: WeiboPost): void {
@@ -689,7 +942,8 @@ export struct WeiboHomeTab {
             isLiked: item.isLiked,
             isFavorited: item.isFavorited,
             isFollowed: nextFollowed,
-            repost: item.repost
+            repost: item.repost,
+            hotComment: item.hotComment
           };
           return clone;
         }
@@ -748,15 +1002,16 @@ export struct WeiboHomeTab {
         .margin(10)
       }
       .width('100%')
-      .constraintSize({ maxWidth: 420 })
+      .constraintSize({ maxWidth: Math.min(this.maxContentWidth(), 560) })
+      .alignSelf(ItemAlign.Start)
       .hitTestBehavior(HitTestMode.Default)
-      .onClick((): void => { this.openPost(post); })
+      .onClick((): void => { this.openPost(post); }, WEIBO_TAP_MAX_MOVEMENT)
     } else if (post.pictures.length === 1) {
       Stack({ alignContent: Alignment.BottomEnd }) {
         Image(post.pictures[0])
           .width('100%')
-          .height(240)
-          .constraintSize({ maxWidth: 320 })
+          .height(Math.min(320, Math.round(Math.min(this.maxContentWidth(), 480) * 0.75)))
+          .constraintSize({ maxWidth: Math.min(this.maxContentWidth(), 480) })
           .objectFit(ImageFit.Cover)
           .borderRadius(14)
         if (this.isGifOrLive(post.pictures[0], post.pictureVideos ?? {}).length > 0) {
@@ -771,6 +1026,7 @@ export struct WeiboHomeTab {
             .margin(6)
         }
       }
+      .alignSelf(ItemAlign.Start)
       .hitTestBehavior(HitTestMode.Default)
       .onClick((): void => {
         const media: WeiboPost = this.socialMediaPost(post);
@@ -778,15 +1034,15 @@ export struct WeiboHomeTab {
           url: 'pages/ImagePreview',
           params: { urls: media.pictures, index: 0, pictureVideos: media.pictureVideos ?? {} }
         });
-      })
-    } else if (post.pictures.length === 4) {
+      }, WEIBO_TAP_MAX_MOVEMENT)
+    } else if (post.pictures.length === 2 || post.pictures.length === 4) {
       Grid() {
-        ForEach(post.pictures.slice(0, 4), (pic: string, index: number): void => {
+        ForEach(post.pictures.slice(0, post.pictures.length), (pic: string, index: number): void => {
           GridItem() {
             Stack({ alignContent: Alignment.BottomEnd }) {
               Image(pic)
                 .width('100%')
-                .height(116)
+                .height(this.pictureCellHeight(post.pictures.length))
                 .objectFit(ImageFit.Cover)
                 .borderRadius(10)
               if (this.isGifOrLive(pic, post.pictureVideos ?? {}).length > 0) {
@@ -808,15 +1064,17 @@ export struct WeiboHomeTab {
                 url: 'pages/ImagePreview',
                 params: { urls: media.pictures, index: index, pictureVideos: media.pictureVideos ?? {} }
               });
-            })
+            }, WEIBO_TAP_MAX_MOVEMENT)
           }
         }, (pic: string, idx: number): string => `${idx}`)
       }
       .columnsTemplate('1fr 1fr')
-      .columnsGap(Spacing.xs)
-      .rowsGap(Spacing.xs)
-      .width(238)
-      .height(238)
+      .columnsGap(this.pictureGap())
+      .rowsGap(this.pictureGap())
+      .width(this.pictureGridWidth(post.pictures.length))
+      .height(this.pictureGridHeight(post.pictures.length))
+      .constraintSize({ maxWidth: this.maxContentWidth() })
+      .alignSelf(ItemAlign.Start)
     } else if (post.pictures.length > 1) {
       Grid() {
         ForEach(post.pictures.slice(0, 9), (pic: string, index: number): void => {
@@ -824,10 +1082,19 @@ export struct WeiboHomeTab {
             Stack({ alignContent: Alignment.BottomEnd }) {
               Image(pic)
                 .width('100%')
-                .height(108)
+                .height(this.pictureCellHeight(post.pictures.length))
                 .objectFit(ImageFit.Cover)
                 .borderRadius(8)
-              if (this.isGifOrLive(pic, post.pictureVideos ?? {}).length > 0) {
+              if (post.pictures.length === 3) {
+                Text('长图')
+                  .fontSize(9)
+                  .fontWeight(FontWeight.Medium)
+                  .fontColor(Color.White)
+                  .backgroundColor('rgba(0, 0, 0, 0.55)')
+                  .padding({ left: 4, right: 4, top: 1, bottom: 1 })
+                  .borderRadius(3)
+                  .margin(4)
+              } else if (this.isGifOrLive(pic, post.pictureVideos ?? {}).length > 0) {
                 Text(this.isGifOrLive(pic, post.pictureVideos ?? {}))
                   .fontSize(9)
                   .fontWeight(FontWeight.Bold)
@@ -846,16 +1113,17 @@ export struct WeiboHomeTab {
                 url: 'pages/ImagePreview',
                 params: { urls: media.pictures, index: index, pictureVideos: media.pictureVideos ?? {} }
               });
-            })
+            }, WEIBO_TAP_MAX_MOVEMENT)
           }
         }, (pic: string, idx: number): string => `${idx}`)
       }
       .columnsTemplate('1fr 1fr 1fr')
-      .columnsGap(Spacing.xs)
-      .rowsGap(Spacing.xs)
-      .width('100%')
-      .constraintSize({ maxWidth: 360 })
+      .columnsGap(this.pictureGap())
+      .rowsGap(this.pictureGap())
+      .width(this.pictureGridWidth(post.pictures.length))
       .height(this.pictureGridHeight(post.pictures.length))
+      .constraintSize({ maxWidth: this.maxContentWidth() })
+      .alignSelf(ItemAlign.Start)
     }
   }
 
@@ -870,7 +1138,7 @@ export struct WeiboHomeTab {
           .borderRadius(21)
           .clip(true)
           .hitTestBehavior(HitTestMode.Default)
-          .onClick((): void => { this.openUserProfile(post.userId, post.userName); })
+          .onClick((): void => { this.openUserProfile(post.userId, post.userName); }, WEIBO_TAP_MAX_MOVEMENT)
       }
       Column({ space: 3 }) {
         Text(post.userName)
@@ -880,7 +1148,7 @@ export struct WeiboHomeTab {
           .maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .hitTestBehavior(HitTestMode.Default)
-          .onClick((): void => { this.openUserProfile(post.userId, post.userName); })
+          .onClick((): void => { this.openUserProfile(post.userId, post.userName); }, WEIBO_TAP_MAX_MOVEMENT)
         Row({ space: 4 }) {
           Text(post.createdAt)
             .fontSize(fs(11, this.fontScale))
@@ -910,7 +1178,7 @@ export struct WeiboHomeTab {
       .border({ width: 0.5, color: post.isFollowed ? Theme.cardBorder(this.isDark) : Theme.brand() })
       .backgroundColor(post.isFollowed ? Color.Transparent : Theme.brandLight(this.isDark))
       .hitTestBehavior(HitTestMode.Default)
-      .onClick((): void => { this.toggleFollow(post); })
+      .onClick((): void => { this.toggleFollow(post); }, WEIBO_TAP_MAX_MOVEMENT)
 
       Button() {
         SymbolGlyph($r('sys.symbol.dot_grid_1x2'))
@@ -921,7 +1189,7 @@ export struct WeiboHomeTab {
       .height(28)
       .backgroundColor(Color.Transparent)
       .accessibilityText('更多操作')
-      .onClick((): void => { this.openPost(post); })
+      .onClick((): void => { this.openPost(post); }, WEIBO_TAP_MAX_MOVEMENT)
     }
     .width('100%')
     .alignItems(VerticalAlign.Center)
@@ -941,9 +1209,9 @@ export struct WeiboHomeTab {
       }
       .layoutWeight(1)
       .justifyContent(FlexAlign.Center)
-      .height(34)
+      .height(44)
       .hitTestBehavior(HitTestMode.Default)
-      .onClick((): void => { this.openPost(post); })
+      .onClick((): void => { this.openPost(post, WeiboDetailTab.Reposts); }, WEIBO_TAP_MAX_MOVEMENT)
 
       // 评论
       Row({ space: 5 }) {
@@ -956,9 +1224,9 @@ export struct WeiboHomeTab {
       }
       .layoutWeight(1)
       .justifyContent(FlexAlign.Center)
-      .height(34)
+      .height(44)
       .hitTestBehavior(HitTestMode.Default)
-      .onClick((): void => { this.openPost(post); })
+      .onClick((): void => { this.openPost(post, WeiboDetailTab.Comments, true); }, WEIBO_TAP_MAX_MOVEMENT)
 
       // 点赞 (鼠尾草绿/薄荷绿高亮)
       Row({ space: 5 }) {
@@ -972,10 +1240,10 @@ export struct WeiboHomeTab {
       }
       .layoutWeight(1)
       .justifyContent(FlexAlign.Center)
-      .height(34)
+      .height(44)
       .hitTestBehavior(HitTestMode.Default)
       .accessibilityText(post.isLiked ? '取消点赞' : '点赞')
-      .onClick((): void => { this.toggleLike(post, !post.isLiked); })
+      .onClick((): void => { this.toggleLike(post, !post.isLiked); }, WEIBO_TAP_MAX_MOVEMENT)
 
       // 分享
       Row({ space: 5 }) {
@@ -985,14 +1253,49 @@ export struct WeiboHomeTab {
       }
       .layoutWeight(1)
       .justifyContent(FlexAlign.Center)
-      .height(34)
+      .height(44)
       .hitTestBehavior(HitTestMode.Default)
-      .onClick((): void => { this.sharePost(post); })
+      .onClick((): void => { this.sharePost(post); }, WEIBO_TAP_MAX_MOVEMENT)
     }
     .width('100%')
     .padding({ top: 8 })
     .border({ width: { top: 0.5 }, color: Theme.cardBorder(this.isDark) })
     .alignItems(VerticalAlign.Center)
+  }
+
+  @Builder
+  HotCommentBox(comment: WeiboComment, post: WeiboPost): void {
+    Column({ space: Spacing.xs }) {
+      Row({ space: 6 }) {
+        Text(comment.likeCount > 0 ? `${comment.likeCount} 赞` : '精选神评')
+          .fontSize(10)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(Color.White)
+          .backgroundColor(Theme.brand())
+          .padding({ left: 6, right: 6, top: 1, bottom: 1 })
+          .borderRadius(4)
+        Text(comment.userName)
+          .fontSize(fs(12, this.fontScale))
+          .fontWeight(FontWeight.Bold)
+          .fontColor(Theme.textPrimary(this.isDark))
+      }
+      .alignItems(VerticalAlign.Center)
+
+      Text(comment.text)
+        .fontSize(fs(12.5, this.fontScale))
+        .fontColor(Theme.textSecondary(this.isDark))
+        .maxLines(2)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .lineHeight(fs(18, this.fontScale))
+    }
+    .width('100%')
+    .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+    .backgroundColor(Theme.bgSubCard(this.isDark))
+    .borderRadius(12)
+    .border({ width: 0.5, color: Theme.cardBorder(this.isDark) })
+    .hitTestBehavior(HitTestMode.Default)
+    .accessibilityText(`神评预览：${comment.userName}，${comment.text}`)
+    .onClick((): void => { this.openPost(post, WeiboDetailTab.Comments, false, comment.id); }, WEIBO_TAP_MAX_MOVEMENT)
   }
 
   @Builder
@@ -1023,7 +1326,7 @@ export struct WeiboHomeTab {
         .accessibilityText('查看微博全文')
         .onClick((): void => {
           this.openPost(post);
-        })
+        }, WEIBO_TAP_MAX_MOVEMENT)
       }
       if (post.pictures.length > 0 || post.videoUrl.length > 0) {
         this.SocialMedia(post)
@@ -1054,12 +1357,13 @@ export struct WeiboHomeTab {
             .accessibilityText('查看原微博全文')
             .onClick((): void => {
               this.openOriginalPost(post);
-            })
+            }, WEIBO_TAP_MAX_MOVEMENT)
           }
           if (post.repost.pictures.length > 0 || post.repost.videoUrl.length > 0) {
             this.SocialMedia(post.repost)
           }
         }
+        .alignItems(HorizontalAlign.Start)
         .width('100%')
         .padding({ left: 12, right: 12, top: 10, bottom: 10 })
         .backgroundColor(Theme.bgSubCard(this.isDark))
@@ -1067,18 +1371,22 @@ export struct WeiboHomeTab {
         .border({ width: 0.5, color: Theme.cardBorder(this.isDark) })
         .hitTestBehavior(HitTestMode.Default)
         .accessibilityText(`查看@${post.repost.userName}的原微博`)
-        .onClick((): void => { this.openOriginalPost(post); })
+        .onClick((): void => { this.openOriginalPost(post); }, WEIBO_TAP_MAX_MOVEMENT)
+      }
+      if (post.hotComment !== null && post.hotComment !== undefined) {
+        this.HotCommentBox(post.hotComment, post)
       }
       this.PostActionBar(post)
     }
+    .alignItems(HorizontalAlign.Start)
     .width('100%')
-    .constraintSize({ maxWidth: 640 })
+    .constraintSize({ maxWidth: 840 })
     .padding({ left: 16, right: 16, top: 14, bottom: 10 })
     .backgroundColor(Theme.bgCard(this.isDark))
     .borderRadius(20)
     .border({ width: 0.5, color: Theme.cardBorder(this.isDark) })
     .shadow(Theme.feedCardShadow(this.isDark))
-    .onClick((): void => { this.openPost(post); })
+    .onClick((): void => { this.openPost(post); }, WEIBO_TAP_MAX_MOVEMENT)
   }
 
   @Builder
@@ -1109,7 +1417,7 @@ export struct WeiboHomeTab {
   @Builder
   WaterfallTimeline(): void {
     // Exactly one vertical scroll owner, also bound to the shell's native Dock.
-    List({ scroller: this.pageScroller, space: 12 }) {
+    List({ scroller: this.pageScroller, space: 12, initialIndex: this.currentFirstVisibleIndex }) {
       LazyForEach(this.timelineDataSource, (post: WeiboPost): void => {
         ListItem() {
           Row() {
@@ -1136,7 +1444,39 @@ export struct WeiboHomeTab {
     .scrollBar(BarState.Off)
     .edgeEffect(EdgeEffect.Spring)
     .cachedCount(6)
+    .onTouch((event: TouchEvent): void => {
+      if (event.type === TouchType.Down && this.isRestoringPosition) {
+        this.isRestoringPosition = false;
+        if (this.restoreTimeoutId !== -1 && typeof clearTimeout !== 'undefined') {
+          clearTimeout(this.restoreTimeoutId);
+          this.restoreTimeoutId = -1;
+        }
+      }
+    })
+    .onScrollIndex((firstIndex: number): void => {
+      if (this.isRestoringPosition) {
+        return;
+      }
+      this.currentFirstVisibleIndex = firstIndex;
+      if (firstIndex >= 0 && firstIndex < this.posts.length) {
+        this.currentTopPostId = this.posts[firstIndex].id;
+        this.scheduleSavePosition();
+      }
+    })
+    .onScrollStop((): void => {
+      if (!this.isRestoringPosition) {
+        this.currentScrollYOffset = this.pageScroller.currentOffset().yOffset;
+        if (this.currentFirstVisibleIndex >= 0 && this.currentFirstVisibleIndex < this.posts.length) {
+          this.currentTopPostId = this.posts[this.currentFirstVisibleIndex].id;
+        }
+        this.scheduleSavePosition();
+      }
+    })
     .onDidScroll((yOffset: number, scrollState: ScrollState): void => {
+      this.currentScrollYOffset = this.pageScroller.currentOffset().yOffset;
+      if (scrollState === ScrollState.Scroll && !this.isRestoringPosition) {
+        this.scheduleSavePosition();
+      }
       if (scrollState !== ScrollState.Scroll) { return; }
       // Restore the floating Dock at the start of the feed; preserve hide/show on scroll.
       if (this.pageScroller.currentOffset().yOffset <= 0) {
@@ -1198,17 +1538,42 @@ export struct WeiboHomeTab {
 
   @Builder
   RefreshableTimeline() {
-    Refresh({ refreshing: $$this.refreshing, offset: 64, friction: 62 }) {
-      this.TimelineScroller()
+    Stack({ alignContent: Alignment.Top }) {
+      Refresh({ refreshing: $$this.refreshing, offset: 64, friction: 62 }) {
+        this.TimelineScroller()
+      }
+      .layoutWeight(1)
+      .width('100%')
+      .height('100%')
+      .backgroundColor(Color.Transparent)
+      .onRefreshing((): void => {
+        Haptic.light();
+        this.refreshFeed();
+      })
+
+      if (this.newPostsAvailableCount > 0) {
+        Row({ space: 6 }) {
+          SymbolGlyph($r('sys.symbol.arrow_up'))
+            .fontSize(fs(13, this.fontScale))
+            .fontColor([Color.White])
+          Text(`有 ${this.newPostsAvailableCount} 条新微博`)
+            .fontSize(fs(12, this.fontScale))
+            .fontWeight(FontWeight.Medium)
+            .fontColor(Color.White)
+        }
+        .padding({ left: 14, right: 14, top: 6, bottom: 6 })
+        .backgroundColor(Theme.brand())
+        .borderRadius(Radius.full)
+        .shadow({ radius: 8, color: 'rgba(0, 0, 0, 0.25)', offsetY: 2 })
+        .margin({ top: this.topInset + 8 })
+        .onClick((): void => {
+          this.applyNewPosts();
+        })
+      }
     }
     .layoutWeight(1)
     .width('100%')
     .height('100%')
-    .backgroundColor(Color.Transparent)
-    .onRefreshing((): void => {
-      Haptic.light();
-      this.refreshFeed();
-    })
   }
 
   /** Content fades when it enters the floating title area. */
@@ -1248,6 +1613,7 @@ export struct WeiboHomeTab {
       }),
       alignment: DialogAlignment.Bottom,
       customStyle: true,
+      autoCancel: false,
       offset: { dx: 0, dy: -20 }
     });
     this.composeDialogController.open();
