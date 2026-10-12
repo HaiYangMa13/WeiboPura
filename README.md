@@ -4,26 +4,13 @@
 
 **鸿蒙原生微博客户端**
 
-[界面预览](#界面预览) · [功能介绍](#功能介绍) · [使用说明](#使用说明) · [问题反馈](https://github.com/HaiYangMa13/fluo/issues) · [隐私政策](docs/PRIVACY.md)
+[功能介绍](#功能介绍) · [使用说明](#使用说明) · [问题反馈](https://github.com/HaiYangMa13/fluo/issues) · [隐私政策](docs/PRIVACY.md)
 
 </div>
 
 Fluo 是一个第三方微博客户端，用 ArkTS / ArkUI 编写，面向 HarmonyOS。
 
 刷关注、看热搜、读长文、翻评论，是它最常用的几个场景。界面默认采用鼠尾草绿配色，支持深浅色模式，保留微博的常用功能，不照搬官方客户端的页面。
-
-## 界面预览
-
-下面是用 HTML 绘制的**界面示意，不是实机截图**。账号、文字和配图均为示例，实际界面以应用为准。
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/fluo-arkui-dark.png">
-  <img src="docs/images/fluo-arkui-light.png" alt="Fluo 首页、发现搜索和微博正文详情的 1:1 ArkUI 真实还原原型" width="1480" height="1050">
-</picture>
-
-查看单页 1:1 原型：[首页与沉浸信息流](docs/images/fluo-device-home.png) · [发现与分类搜索](docs/images/fluo-device-search.png) · [微博正文与三栏详情](docs/images/fluo-device-detail.png)
-
-本地 [HTML 1:1 原型页](docs/showcase/index.html) 基于实际 ArkUI 源码结构与控件样式构建，支持深浅色切换、分类筛选与三栏联动。下载仓库后可在浏览器中直接打开预览。
 
 ## 功能介绍
 
