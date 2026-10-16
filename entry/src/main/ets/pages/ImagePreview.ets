@@ -38,6 +38,17 @@ const MAX_STREAM_FETCH_PER_TRIGGER: number = 2;
  */
 const MAX_STREAM_PAGES: number = 20;
 
+function sanitizePreviewUrl(url: string): string {
+  const trimmed = url.trim();
+  if (trimmed.startsWith('//')) {
+    return `https:${trimmed}`;
+  }
+  if (trimmed.startsWith('http://')) {
+    return `https://${trimmed.substring(7)}`;
+  }
+  return trimmed;
+}
+
 @Entry
 @Component
 struct ImagePreview {
@@ -107,14 +118,14 @@ struct ImagePreview {
     const routeUrls: Object | undefined = params ? params.urls : undefined;
     if (Array.isArray(routeUrls)) {
       this.urls = (routeUrls as Object[])
-        .map((item: Object) => `${item}`)
+        .map((item: Object) => sanitizePreviewUrl(`${item}`))
         .filter((item: string) => item.length > 0);
     } else if (typeof routeUrls === 'string') {
       this.urls = routeUrls.split(',')
         .filter((item: string) => item.length > 0)
-        .map((item: string) => decodeURIComponent(item));
+        .map((item: string) => sanitizePreviewUrl(decodeURIComponent(item)));
     } else if (params && typeof params.url === 'string') {
-      this.urls = [decodeURIComponent(`${params.url}`)];
+      this.urls = [sanitizePreviewUrl(decodeURIComponent(`${params.url}`))];
     }
     if (params && params.index !== undefined) {
       this.currentIndex = Math.max(0, Math.min(Math.max(0, this.urls.length - 1), Math.floor(Number(params.index) || 0)));
@@ -605,7 +616,8 @@ struct ImagePreview {
         }
         const fresh: string[] = this.extractStreamImages(result.floors ?? []);
         if (fresh.length > 0) {
-          this.urls = [...this.urls, ...fresh];
+          const cleanFresh: string[] = fresh.map((u: string) => sanitizePreviewUrl(u));
+          this.urls = [...this.urls, ...cleanFresh];
           break;
         }
       }

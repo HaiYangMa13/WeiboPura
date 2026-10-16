@@ -1,6 +1,6 @@
 import { WeiboTabTouchTracker, WEIBO_TAP_MAX_MOVEMENT } from '../common/WeiboTabSwipe';
 import { WeiboPost, WeiboSearchCompositeResult, WeiboSearchType, WeiboUser } from '../model/WeiboModel';
-import { WeiboService } from '../service/WeiboService';
+import { WeiboService, sanitizeHttpsUrl } from '../service/WeiboService';
 import { WeiboAuthManager } from '../service/WeiboAuthManager';
 import { withWeiboLike } from '../common/WeiboPostState';
 import { EmptyView, ErrorView, LoadingView, ThreadCard, ThreadItemData, ThreadSharePayload } from '../components/CommonComponents';
@@ -485,26 +485,24 @@ export struct WeiboSearchResult {
   HighlightUserCard(user: WeiboUser) {
     Row({ space: Spacing.md }) {
       Stack({ alignContent: Alignment.BottomEnd }) {
-        if (user.avatarUrl.length > 0) {
-          Image(user.avatarUrl)
-            .width(44)
-            .height(44)
-            .borderRadius(Radius.full)
-            .objectFit(ImageFit.Cover)
-            .backgroundColor(Theme.bgSubCard(this.isDark))
-        } else {
-          Stack() {
-            Text(user.screenName.length > 0 ? user.screenName.substring(0, 1) : '微')
-              .fontSize(fs(18, this.fontScale))
-              .fontWeight(FontWeight.Bold)
-              .fontColor(Color.White)
+        Stack() {
+          Text(user.screenName.length > 0 ? user.screenName.substring(0, 1) : '微')
+            .fontSize(fs(18, this.fontScale))
+            .fontWeight(FontWeight.Bold)
+            .fontColor(Color.White)
+          if (user.avatarUrl.length > 0) {
+            Image(sanitizeHttpsUrl(user.avatarUrl))
+              .width(44)
+              .height(44)
+              .borderRadius(Radius.full)
+              .objectFit(ImageFit.Cover)
           }
-          .width(44)
-          .height(44)
-          .borderRadius(Radius.full)
-          .backgroundColor(Theme.brand())
-          .alignContent(Alignment.Center)
         }
+        .width(44)
+        .height(44)
+        .borderRadius(Radius.full)
+        .backgroundColor(Theme.brand())
+        .alignContent(Alignment.Center)
         if (user.verified) {
           Text('V')
             .fontSize(8)
@@ -573,26 +571,24 @@ export struct WeiboSearchResult {
   UserListItem(user: WeiboUser) {
     Row({ space: Spacing.md }) {
       Stack({ alignContent: Alignment.BottomEnd }) {
-        if (user.avatarUrl.length > 0) {
-          Image(user.avatarUrl)
-            .width(48)
-            .height(48)
-            .borderRadius(Radius.full)
-            .objectFit(ImageFit.Cover)
-            .backgroundColor(Theme.bgSubCard(this.isDark))
-        } else {
-          Stack() {
-            Text(user.screenName.length > 0 ? user.screenName.substring(0, 1) : '微')
-              .fontSize(fs(20, this.fontScale))
-              .fontWeight(FontWeight.Bold)
-              .fontColor(Color.White)
+        Stack() {
+          Text(user.screenName.length > 0 ? user.screenName.substring(0, 1) : '微')
+            .fontSize(fs(20, this.fontScale))
+            .fontWeight(FontWeight.Bold)
+            .fontColor(Color.White)
+          if (user.avatarUrl.length > 0) {
+            Image(sanitizeHttpsUrl(user.avatarUrl))
+              .width(48)
+              .height(48)
+              .borderRadius(Radius.full)
+              .objectFit(ImageFit.Cover)
           }
-          .width(48)
-          .height(48)
-          .borderRadius(Radius.full)
-          .backgroundColor(Theme.brand())
-          .alignContent(Alignment.Center)
         }
+        .width(48)
+        .height(48)
+        .borderRadius(Radius.full)
+        .backgroundColor(Theme.brand())
+        .alignContent(Alignment.Center)
         if (user.verified) {
           Text('V')
             .fontSize(9)

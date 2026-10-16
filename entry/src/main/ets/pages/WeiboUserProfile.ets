@@ -1,6 +1,7 @@
 import { WeiboPost, WeiboUser } from '../model/WeiboModel';
-import { WeiboService } from '../service/WeiboService';
+import { WeiboService, sanitizeHttpsUrl } from '../service/WeiboService';
 import { common } from '@kit.AbilityKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 import { ShareUtil } from '../common/ShareUtil';
 import { ThreadCard, ThreadItemData } from '../components/CommonComponents';
 import { ImmMaterial, Radius, Spacing, Theme, fs, isDarkMode } from '../common/Theme';
@@ -32,10 +33,14 @@ export struct WeiboUserProfile {
   @State profile: WeiboUser | null = null;
   @State posts: WeiboPost[] = [];
   @State loading: boolean = true;
+  @State loadingMore: boolean = false;
+  @State hasMore: boolean = true;
+  @State currentPage: number = 1;
   @State errorMessage: string = '';
   @State isFollowing: boolean = false;
   @State followLoading: boolean = false;
   @State likingIds: string[] = [];
+  @State avatarFailed: boolean = false;
   private profileEpoch: number = 0;
   @StorageLink('weiboAuthTick') @Watch('onWeiboAuthTick') weiboAuthTick: number = 0;
   @StorageLink('fontScale') fontScale: number = 1.0;
@@ -120,6 +125,9 @@ export struct WeiboUserProfile {
     this.isFollowing = false;
     this.followLoading = false;
     this.likingIds = [];
+    this.currentPage = 1;
+    this.hasMore = true;
+    this.loadingMore = false;
     if (!WeiboAuthManager.getInstance().isSessionChanging()) { this.loadProfile(); }
   }
 
@@ -130,6 +138,7 @@ export struct WeiboUserProfile {
     const epoch: number = ++this.profileEpoch;
     this.loading = true;
     this.errorMessage = '';
+    this.avatarFailed = false;
     try {
       const service: WeiboService = WeiboService.getInstance();
       const profile: WeiboUser = await service.fetchUserProfile(this.userId);
@@ -139,6 +148,8 @@ export struct WeiboUserProfile {
       this.profile = profile;
       this.isFollowing = profile.following;
       this.posts = posts;
+      this.currentPage = 1;
+      this.hasMore = posts.length > 0;
     } catch (error) {
       if (epoch !== this.profileEpoch) { return; }
       this.profile = null;
@@ -146,6 +157,35 @@ export struct WeiboUserProfile {
       this.errorMessage = (error as Error).message ?? '用户资料加载失败，请稍后重试';
     } finally {
       if (epoch === this.profileEpoch) { this.loading = false; }
+    }
+  }
+
+  /** 滚动到底加载下一页：与首页 loadMore 同口径（去重追加，空页即到底）。 */
+  private async loadMorePosts(): Promise<void> {
+    if (this.loading || this.loadingMore || !this.hasMore || this.userId.length === 0) {
+      return;
+    }
+    const epoch: number = this.profileEpoch;
+    this.loadingMore = true;
+    try {
+      const nextPage: number = this.currentPage + 1;
+      const result: WeiboPost[] = await WeiboService.getInstance().fetchUserTimeline(this.userId, nextPage);
+      if (epoch !== this.profileEpoch) { return; }
+      const added: WeiboPost[] = result.filter((item: WeiboPost): boolean =>
+        !this.posts.some((old: WeiboPost): boolean => old.id === item.id));
+      if (added.length > 0) {
+        this.posts = this.posts.concat(added);
+        this.currentPage = nextPage;
+        this.hasMore = result.length > 0;
+      } else {
+        this.hasMore = false;
+      }
+    } catch (error) {
+      if (epoch === this.profileEpoch) {
+        this.getUIContext().getPromptAction().showToast({ message: (error as Error).message ?? '加载更多微博失败，请重试' });
+      }
+    } finally {
+      if (epoch === this.profileEpoch) { this.loadingMore = false; }
     }
   }
 
@@ -294,25 +334,34 @@ export struct WeiboUserProfile {
         .alignContent(Alignment.Center)
       }
       Row({ space: Spacing.md }) {
-        if (currentProfile.avatarUrl.length > 0) {
-          Image(currentProfile.avatarUrl)
-            .width(72)
-            .height(72)
-            .borderRadius(Radius.full)
-            .objectFit(ImageFit.Cover)
-        } else {
-          Stack() {
-            Text(currentProfile.screenName.length > 0 ? currentProfile.screenName.substring(0, 1) : '微')
-              .fontSize(fs(26, this.fontScale))
-              .fontWeight(FontWeight.Bold)
-              .fontColor(Color.White)
+        Stack() {
+          Text(currentProfile.screenName.length > 0 ? currentProfile.screenName.substring(0, 1) : '微')
+            .fontSize(fs(26, this.fontScale))
+            .fontWeight(FontWeight.Bold)
+            .fontColor(Color.White)
+          if (currentProfile.avatarUrl.length > 0 && !this.avatarFailed) {
+            Image(sanitizeHttpsUrl(currentProfile.avatarUrl))
+              .width(72)
+              .height(72)
+              .borderRadius(Radius.full)
+              .border({ width: 0.5, color: this.isDark ? 'rgba(255, 255, 255, 0.12)' : 'rgba(0, 0, 0, 0.08)', radius: Radius.full })
+              .objectFit(ImageFit.Cover)
+              .onError((err: ImageError) => {
+                hilog.error(0x0A01, 'AvatarDebug', 'Profile avatar onError: url=%{public}s w=%{public}d h=%{public}d',
+                  currentProfile.avatarUrl, err.componentWidth, err.componentHeight);
+                this.avatarFailed = true;
+              })
+              .onComplete((msg) => {
+                hilog.info(0x0A01, 'AvatarDebug', 'Profile avatar onComplete: url=%{public}s w=%{public}d h=%{public}d loadingStatus=%{public}d',
+                  currentProfile.avatarUrl, msg?.width ?? 0, msg?.height ?? 0, msg?.loadingStatus ?? 0);
+              })
           }
-          .width(72)
-          .height(72)
-          .backgroundColor(Theme.brand())
-          .borderRadius(Radius.full)
-          .alignContent(Alignment.Center)
         }
+        .width(72)
+        .height(72)
+        .backgroundColor(Theme.brand())
+        .borderRadius(Radius.full)
+        .alignContent(Alignment.Center)
         Column({ space: 4 }) {
           Text(currentProfile.screenName.length > 0 ? currentProfile.screenName : this.fallbackName)
             .fontSize(fs(20, this.fontScale))
@@ -444,6 +493,24 @@ export struct WeiboUserProfile {
                 skipImageCache: true
               })
             }, (post: WeiboPost): string => post.id)
+            if (this.loadingMore) {
+              Row({ space: Spacing.sm }) {
+                LoadingProgress().width(20).height(20)
+                Text('正在加载更多…')
+                  .fontSize(fs(12, this.fontScale))
+                  .fontColor(Theme.textTertiary(this.isDark))
+              }
+              .width('100%')
+              .justifyContent(FlexAlign.Center)
+              .padding({ top: Spacing.md, bottom: Spacing.md })
+            } else if (!this.hasMore) {
+              Text('已加载全部内容')
+                .width('100%')
+                .fontSize(fs(12, this.fontScale))
+                .fontColor(Theme.textTertiary(this.isDark))
+                .textAlign(TextAlign.Center)
+                .padding({ top: Spacing.md, bottom: Spacing.md })
+            }
           }
         }
       }
@@ -459,6 +526,11 @@ export struct WeiboUserProfile {
     .height('100%')
     .scrollBar(BarState.Off)
     .edgeEffect(EdgeEffect.Spring)
+    .onScrollEdge((edge: Edge): void => {
+      if (edge === Edge.Bottom) {
+        this.loadMorePosts();
+      }
+    })
   }
 
   @Builder

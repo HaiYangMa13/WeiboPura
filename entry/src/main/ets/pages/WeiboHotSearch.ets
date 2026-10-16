@@ -1,6 +1,6 @@
 import { WeiboHotTopic, WeiboSearchSuggestionBundle, WeiboSuggestion, WeiboUser } from '../model/WeiboModel';
 import { curves } from '@kit.ArkUI';
-import { WeiboService } from '../service/WeiboService';
+import { WeiboService, sanitizeHttpsUrl } from '../service/WeiboService';
 import { CacheManager } from '../cache/CacheManager';
 import { CACHE_KEY } from '../common/Constants';
 import { ImmBlur, ImmMaterial, Radius, Spacing, Theme, fs, isDarkMode } from '../common/Theme';
@@ -255,21 +255,23 @@ export struct WeiboHotSearch {
   @Builder
   UserDirectCard(user: WeiboUser) {
     Row({ space: Spacing.md }) {
-      if (user.avatarUrl.length > 0) {
-        Image(user.avatarUrl)
-          .width(42)
-          .height(42)
-          .borderRadius(21)
-          .objectFit(ImageFit.Cover)
-      } else {
+      Stack() {
         SymbolGlyph($r('sys.symbol.person'))
           .fontSize(22)
-          .width(42)
-          .height(42)
-          .fontColor([$r('sys.color.icon_primary')])
-          .backgroundColor(Theme.segGlass(this.isDark, false))
-          .borderRadius(21)
+          .fontColor([Color.White])
+        if (user.avatarUrl.length > 0) {
+          Image(sanitizeHttpsUrl(user.avatarUrl))
+            .width(42)
+            .height(42)
+            .borderRadius(21)
+            .objectFit(ImageFit.Cover)
+        }
       }
+      .width(42)
+      .height(42)
+      .borderRadius(21)
+      .backgroundColor(Theme.brand())
+      .alignContent(Alignment.Center)
 
       Column({ space: 4 }) {
         Row({ space: 4 }) {

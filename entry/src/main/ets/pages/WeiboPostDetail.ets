@@ -6,7 +6,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { curves, window } from '@kit.ArkUI';
 import { WeiboComment, WeiboCommentSort, WeiboDetailTab, WeiboLikeUser, WeiboLikesPage, WeiboPost, WeiboRepostsPage, WeiboUser } from '../model/WeiboModel';
 import { WeiboAuthManager } from '../service/WeiboAuthManager';
-import { WeiboService } from '../service/WeiboService';
+import { WeiboService, sanitizeHttpsUrl } from '../service/WeiboService';
 import { Breakpoint, ImmBlur, ImmMaterial, MaterialManager, Radius, Spacing, Theme, fs, isDarkMode, isLargeScreenForm, isPuraXMaxDevice, isWideFormDevice as detectWideFormDevice } from '../common/Theme';
 import { ShareUtil } from '../common/ShareUtil';
 import { Haptic } from '../common/Haptic';
@@ -1169,26 +1169,25 @@ export struct WeiboPostDetail {
     if (this.post !== null) {
       Column({ space: Spacing.sm }) {
         Row({ space: Spacing.sm }) {
-          if (this.post.userAvatar.length > 0) {
-            Image(this.post.userAvatar)
-              .width(42)
-              .height(42)
-              .objectFit(ImageFit.Cover)
-              .borderRadius(Radius.full)
-              .clip(true)
-          } else {
-            Stack() {
-              Text(this.post.userName.substring(0, 1))
-                .fontSize(18)
-                .fontWeight(FontWeight.Bold)
-                .fontColor(Color.White)
+          Stack() {
+            Text(this.post.userName.length > 0 ? this.post.userName.substring(0, 1) : '微')
+              .fontSize(18)
+              .fontWeight(FontWeight.Bold)
+              .fontColor(Color.White)
+            if (this.post.userAvatar.length > 0) {
+              Image(sanitizeHttpsUrl(this.post.userAvatar))
+                .width(42)
+                .height(42)
+                .objectFit(ImageFit.Cover)
+                .borderRadius(Radius.full)
+                .clip(true)
             }
-            .width(42)
-            .height(42)
-            .backgroundColor(Theme.brand())
-            .borderRadius(Radius.full)
-            .alignContent(Alignment.Center)
           }
+          .width(42)
+          .height(42)
+          .backgroundColor(Theme.brand())
+          .borderRadius(Radius.full)
+          .alignContent(Alignment.Center)
           Column({ space: 2 }) {
             Text(this.post.userName)
               .fontSize(16)
@@ -1214,13 +1213,13 @@ export struct WeiboPostDetail {
           .maxLines(5)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
         if (this.post.pictures.length > 0) {
-          Image(this.post.pictures[0])
+          Image(sanitizeHttpsUrl(this.post.pictures[0]))
             .width('100%')
             .height(148)
             .objectFit(ImageFit.Cover)
             .borderRadius(Radius.md)
         } else if (this.post.videoCoverUrl.length > 0) {
-          Image(this.post.videoCoverUrl)
+          Image(sanitizeHttpsUrl(this.post.videoCoverUrl))
             .width('100%')
             .height(148)
             .objectFit(ImageFit.Cover)
@@ -1486,7 +1485,7 @@ export struct WeiboPostDetail {
   PictureGrid(pictures: string[], pictureVideos: Record<string, string> = {}) {
     if (this.visiblePictureCount(pictures) === 1) {
       Stack({ alignContent: Alignment.BottomEnd }) {
-        Image(pictures[0])
+        Image(sanitizeHttpsUrl(pictures[0]))
           .width('100%')
           .height(Math.min(340, Math.round(Math.min(this.maxContentWidth(), 520) * 0.75)))
           .constraintSize({ maxWidth: Math.min(this.maxContentWidth(), 520) })
@@ -1513,7 +1512,7 @@ export struct WeiboPostDetail {
         ForEach(pictures.slice(0, this.visiblePictureCount(pictures)), (picture: string, index: number): void => {
           GridItem() {
             Stack({ alignContent: Alignment.BottomEnd }) {
-              Image(picture)
+              Image(sanitizeHttpsUrl(picture))
                 .width('100%')
                 .height(this.pictureCellHeight(pictures))
                 .objectFit(ImageFit.Cover)
@@ -1602,25 +1601,24 @@ export struct WeiboPostDetail {
   PostBody(params: PostBodyParams) {
     Column({ space: Spacing.md }) {
       Row({ space: Spacing.sm }) {
-        if (params.post.userAvatar.length > 0) {
-          Image(params.post.userAvatar)
-            .width(44)
-            .height(44)
-            .borderRadius(Radius.full)
-            .objectFit(ImageFit.Cover)
-        } else {
-          Stack() {
-            Text(params.post.userName.substring(0, 1))
-              .fontSize(fs(17, this.fontScale))
-              .fontWeight(FontWeight.Bold)
-              .fontColor(Theme.brand())
+        Stack() {
+          Text(params.post.userName.length > 0 ? params.post.userName.substring(0, 1) : '微')
+            .fontSize(fs(17, this.fontScale))
+            .fontWeight(FontWeight.Bold)
+            .fontColor(Color.White)
+          if (params.post.userAvatar.length > 0) {
+            Image(sanitizeHttpsUrl(params.post.userAvatar))
+              .width(44)
+              .height(44)
+              .borderRadius(Radius.full)
+              .objectFit(ImageFit.Cover)
           }
-          .width(44)
-          .height(44)
-          .backgroundColor(Theme.brandBg(this.isDark))
-          .borderRadius(Radius.full)
-          .alignContent(Alignment.Center)
         }
+        .width(44)
+        .height(44)
+        .backgroundColor(Theme.brand())
+        .borderRadius(Radius.full)
+        .alignContent(Alignment.Center)
         Column({ space: 2 }) {
           Text(params.post.userName)
             .fontSize(fs(16, this.fontScale))
@@ -1688,11 +1686,22 @@ export struct WeiboPostDetail {
   @Builder
   CommentItem(comment: WeiboComment) {
     Row({ space: Spacing.sm }) {
-      if (comment.userAvatar.length > 0) {
-        Image(comment.userAvatar)
-          .width(34).height(34).borderRadius(Radius.full).objectFit(ImageFit.Cover)
-          .onClick((): void => { this.openUserProfile(comment.userId, comment.userName); }, WEIBO_TAP_MAX_MOVEMENT)
+      Stack() {
+        Text(comment.userName.length > 0 ? comment.userName.substring(0, 1) : '微')
+          .fontSize(fs(14, this.fontScale))
+          .fontWeight(FontWeight.Bold)
+          .fontColor(Color.White)
+        if (comment.userAvatar.length > 0) {
+          Image(sanitizeHttpsUrl(comment.userAvatar))
+            .width(34).height(34).borderRadius(Radius.full).objectFit(ImageFit.Cover)
+        }
       }
+      .width(34)
+      .height(34)
+      .borderRadius(Radius.full)
+      .backgroundColor(Theme.brand())
+      .alignContent(Alignment.Center)
+      .onClick((): void => { this.openUserProfile(comment.userId, comment.userName); }, WEIBO_TAP_MAX_MOVEMENT)
       Column({ space: 5 }) {
         Row() {
           Text(comment.userName)
@@ -1799,21 +1808,23 @@ export struct WeiboPostDetail {
   @Builder
   LikeUserItem(user: WeiboLikeUser) {
     Row({ space: Spacing.md }) {
-      if (user.userAvatar.length > 0) {
-        Image(user.userAvatar)
-          .width(42)
-          .height(42)
-          .borderRadius(21)
-          .objectFit(ImageFit.Cover)
-      } else {
+      Stack() {
         SymbolGlyph($r('sys.symbol.person'))
           .fontSize(22)
-          .width(42)
-          .height(42)
-          .fontColor([$r('sys.color.icon_primary')])
-          .backgroundColor(Theme.segGlass(this.isDark, false))
-          .borderRadius(21)
+          .fontColor([Color.White])
+        if (user.userAvatar.length > 0) {
+          Image(sanitizeHttpsUrl(user.userAvatar))
+            .width(42)
+            .height(42)
+            .borderRadius(21)
+            .objectFit(ImageFit.Cover)
+        }
       }
+      .width(42)
+      .height(42)
+      .borderRadius(21)
+      .backgroundColor(Theme.brand())
+      .alignContent(Alignment.Center)
       Column({ space: 4 }) {
         Row({ space: 4 }) {
           Text(user.userName)
@@ -1888,16 +1899,27 @@ export struct WeiboPostDetail {
   @Builder
   RepostItem(repost: WeiboPost) {
     Row({ space: Spacing.sm }) {
-      if (repost.userAvatar.length > 0) {
-        Image(repost.userAvatar)
-          .width(36)
-          .height(36)
-          .borderRadius(18)
-          .objectFit(ImageFit.Cover)
-          .onClick((): void => {
-            this.openUserProfile(repost.userId, repost.userName);
-          }, WEIBO_TAP_MAX_MOVEMENT)
+      Stack() {
+        Text(repost.userName.length > 0 ? repost.userName.substring(0, 1) : '微')
+          .fontSize(fs(15, this.fontScale))
+          .fontWeight(FontWeight.Bold)
+          .fontColor(Color.White)
+        if (repost.userAvatar.length > 0) {
+          Image(sanitizeHttpsUrl(repost.userAvatar))
+            .width(36)
+            .height(36)
+            .borderRadius(18)
+            .objectFit(ImageFit.Cover)
+        }
       }
+      .width(36)
+      .height(36)
+      .borderRadius(18)
+      .backgroundColor(Theme.brand())
+      .alignContent(Alignment.Center)
+      .onClick((): void => {
+        this.openUserProfile(repost.userId, repost.userName);
+      }, WEIBO_TAP_MAX_MOVEMENT)
       Column({ space: 4 }) {
         Row({ space: 4 }) {
           Text(repost.userName)
@@ -2114,32 +2136,31 @@ export struct WeiboPostDetail {
 
   @Builder
   CommentAvatar() {
-    if (this.accountAvatarUrl.length > 0) {
-      Image(this.accountAvatarUrl)
-        .width(40)
-        .height(40)
-        .objectFit(ImageFit.Cover)
-        .borderRadius(20)
-        .clip(true)
-    } else if (this.accountName.length > 0) {
-      Text(this.accountName.substring(0, 1).toUpperCase())
-        .width(40)
-        .height(40)
-        .fontSize(fs(16, this.fontScale))
-        .fontWeight(FontWeight.Bold)
-        .fontColor(Color.White)
-        .backgroundColor(Theme.brand())
-        .borderRadius(20)
-        .textAlign(TextAlign.Center)
-    } else {
-      SymbolGlyph($r('sys.symbol.person'))
-        .width(40)
-        .height(40)
-        .fontSize(fs(20, this.fontScale))
-        .fontColor([$r('sys.color.icon_primary')])
-        .backgroundColor(Theme.segGlass(this.isDark, false))
-        .borderRadius(20)
+    Stack() {
+      if (this.accountName.length > 0) {
+        Text(this.accountName.substring(0, 1).toUpperCase())
+          .fontSize(fs(16, this.fontScale))
+          .fontWeight(FontWeight.Bold)
+          .fontColor(Color.White)
+      } else {
+        SymbolGlyph($r('sys.symbol.person'))
+          .fontSize(20)
+          .fontColor([Color.White])
+      }
+      if (this.accountAvatarUrl.length > 0) {
+        Image(sanitizeHttpsUrl(this.accountAvatarUrl))
+          .width(40)
+          .height(40)
+          .objectFit(ImageFit.Cover)
+          .borderRadius(20)
+          .clip(true)
+      }
     }
+    .width(40)
+    .height(40)
+    .borderRadius(20)
+    .backgroundColor(Theme.brand())
+    .alignContent(Alignment.Center)
   }
 
   private formatCount(num: number): string {

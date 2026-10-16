@@ -7,6 +7,24 @@ import { WeiboComment, WeiboCommentSort, WeiboCommentsPage, WeiboDetailTab, Weib
 import { WeiboAuthManager } from './WeiboAuthManager';
 import { WeiboVisitorSession } from './WeiboVisitorSession';
 import { prepareWeiboImage, WeiboUploadImage } from './WeiboMedia';
+import { hilog } from '@kit.PerformanceAnalysisKit';
+
+export function sanitizeHttpsUrl(url: string | undefined | null): string {
+  if (url === undefined || url === null) {
+    return '';
+  }
+  const trimmed: string = url.trim();
+  if (trimmed.length === 0) {
+    return '';
+  }
+  if (trimmed.startsWith('//')) {
+    return `https:${trimmed}`;
+  }
+  if (trimmed.startsWith('http://')) {
+    return `https://${trimmed.substring(7)}`;
+  }
+  return trimmed;
+}
 
 interface WeiboUploadResponse {
   ok?: number;
@@ -595,7 +613,7 @@ export class WeiboService {
       const rawId: Object = item['idstr'] ?? item['id'] ?? `${page}_${i}`;
       const senderId: string = `${userObj['idstr'] ?? userObj['id'] ?? ''}`;
       const senderName: string = `${userObj['screen_name'] ?? '微博用户'}`;
-      const senderAvatar: string = `${userObj['profile_image_url'] ?? userObj['avatar_hd'] ?? ''}`;
+      const senderAvatar: string = sanitizeHttpsUrl(`${userObj['profile_image_url'] ?? userObj['avatar_hd'] ?? ''}`);
       const text: string = normalizeWeiboText(`${item['text'] ?? item['text_raw'] ?? item['content'] ?? ''}`);
       const statusObj: Record<string, Object> = (item['status'] ?? item['reply_comment'] ?? item['mblog'] ??
         (type === 'mention' ? item : {})) as Record<string, Object>;
@@ -1077,7 +1095,7 @@ export class WeiboService {
               : item;
             const uid: string = `${userObj['idstr'] ?? userObj['id'] ?? ''}`;
             const name: string = `${userObj['screen_name'] ?? userObj['name'] ?? ''}`;
-            const avatar: string = `${userObj['avatar_large'] ?? userObj['profile_image_url'] ?? ''}`;
+            const avatar: string = sanitizeHttpsUrl(`${userObj['avatar_large'] ?? userObj['profile_image_url'] ?? ''}`);
             const followers: string = this.formatFollowersCount(userObj['followers_count_str'] as string ?? userObj['followers_count'] as number);
             const verified: boolean = userObj['verified'] === true;
             const verifiedType: number | undefined = typeof userObj['verified_type'] === 'number' ? userObj['verified_type'] as number : undefined;
@@ -1112,7 +1130,7 @@ export class WeiboService {
         : item;
       const uid: string = `${userObj['idstr'] ?? userObj['id'] ?? ''}`;
       const name: string = `${userObj['screen_name'] ?? userObj['name'] ?? ''}`;
-      const avatar: string = `${userObj['avatar_large'] ?? userObj['profile_image_url'] ?? ''}`;
+      const avatar: string = sanitizeHttpsUrl(`${userObj['avatar_large'] ?? userObj['profile_image_url'] ?? ''}`);
       const followers: string = this.formatFollowersCount(userObj['followers_count_str'] as string ?? userObj['followers_count'] as number);
       const verified: boolean = userObj['verified'] === true;
       const verifiedType: number | undefined = typeof userObj['verified_type'] === 'number' ? userObj['verified_type'] as number : undefined;
@@ -1474,6 +1492,9 @@ export class WeiboService {
     for (let index: number = 0; index < cards.length; index++) {
       const card: WeiboCardJson = cards[index];
       if (card.mblog !== undefined && (card.card_type === 9 || card.card_type === undefined)) {
+        if (card.mblog.user === undefined && card.user !== undefined) {
+          card.mblog.user = card.user;
+        }
         posts.push(this.toPost(card.mblog));
       }
       const group: WeiboCardJson[] | undefined = card.card_group;
@@ -1516,7 +1537,11 @@ export class WeiboService {
 
   private toUser(source: WeiboUserJson): WeiboUser {
     const hdAvatar: string = source.avatar_hd?.trim() ?? '';
-    const avatar: string = hdAvatar.length > 0 ? hdAvatar : (source.profile_image_url?.trim() ?? '');
+    const rawAvatar: string = hdAvatar.length > 0 ? hdAvatar : (source.profile_image_url?.trim() ?? '');
+    const avatar: string = sanitizeHttpsUrl(rawAvatar);
+    hilog.info(0x0A01, 'AvatarDebug', 'toUser: screen_name=%{public}s hd=%{public}s raw=%{public}s final=%{public}s',
+      source.screen_name ?? '', hdAvatar, source.profile_image_url ?? '', avatar);
+    const coverUrl: string = sanitizeHttpsUrl(source.cover_image_phone?.trim() ?? '');
     const rawId: string | number | undefined = source.idstr ?? source.id;
     const rawFollowersCount: string | number | undefined = source.followers_count;
     const rawFollowingCount: string | number | undefined = source.follow_count;
@@ -1530,7 +1555,7 @@ export class WeiboService {
       screenName: source.screen_name ?? '',
       description: source.description ?? '',
       avatarUrl: avatar,
-      coverUrl: source.cover_image_phone ?? '',
+      coverUrl: coverUrl,
       followersCount: followersCount,
       followingCount: followingCount,
       statusesCount: statusesCount,
@@ -1593,13 +1618,7 @@ export class WeiboService {
   }
 
   private pushPictureUrl(pictures: string[], seen: Record<string, boolean>, url: string): void {
-    const trimmed: string = url.trim();
-    let clean: string = trimmed;
-    if (clean.startsWith('//')) {
-      clean = `https:${clean}`;
-    } else if (clean.startsWith('http://')) {
-      clean = `https://${clean.substring(7)}`;
-    }
+    const clean: string = sanitizeHttpsUrl(url);
     if (clean.length === 0 || seen[clean] === true) {
       return;
     }
@@ -1622,11 +1641,11 @@ export class WeiboService {
       || info.thumbnail?.url
       || '';
     if (url.length > 0) {
-      return url;
+      return sanitizeHttpsUrl(url);
     }
     const rec: Record<string, Object> = info as Record<string, Object>;
     if (typeof rec['url'] === 'string') {
-      return rec['url'] as string;
+      return sanitizeHttpsUrl(rec['url'] as string);
     }
     return '';
   }
@@ -1636,7 +1655,7 @@ export class WeiboService {
       return '';
     }
     if (typeof picture === 'string') {
-      return picture;
+      return sanitizeHttpsUrl(picture);
     }
     const url: string = picture.original?.url
       || picture.largest?.url
@@ -1645,14 +1664,14 @@ export class WeiboService {
       || picture.url
       || '';
     if (url.length > 0) {
-      return url;
+      return sanitizeHttpsUrl(url);
     }
     const rec: Record<string, Object> = picture as Record<string, Object>;
     if (typeof rec['bmiddle_pic'] === 'string') {
-      return rec['bmiddle_pic'] as string;
+      return sanitizeHttpsUrl(rec['bmiddle_pic'] as string);
     }
     if (typeof rec['thumbnail_pic'] === 'string') {
-      return rec['thumbnail_pic'] as string;
+      return sanitizeHttpsUrl(rec['thumbnail_pic'] as string);
     }
     if (typeof rec['pid'] === 'string' && (rec['pid'] as string).length > 0) {
       return `https://wx1.sinaimg.cn/large/${rec['pid']}.jpg`;
@@ -1689,7 +1708,7 @@ export class WeiboService {
     for (let index: number = 0; index < candidates.length; index++) {
       const candidate: string = candidates[index].trim();
       if (candidate.length > 0) {
-        return candidate;
+        return sanitizeHttpsUrl(candidate);
       }
     }
     return '';

@@ -7,7 +7,7 @@ import { ThreadListSkeleton } from '../components/Skeleton';
 import { Breakpoint, CARD_COLUMNS_KEY, ImmBlur, ImmMaterial, Radius, Spacing, Theme, fs, isDarkMode, isLargeScreenForm, isPuraXMaxDevice, isWideFormDevice as detectWideFormDevice, overrideColumns, readColumnMode } from '../common/Theme';
 import { WeiboComment, WeiboDetailTab, WeiboPost, WeiboTimelinePage, WeiboUser } from '../model/WeiboModel';
 import { WeiboAuthManager } from '../service/WeiboAuthManager';
-import { WeiboService } from '../service/WeiboService';
+import { WeiboService, sanitizeHttpsUrl } from '../service/WeiboService';
 import { withWeiboFollow, withWeiboLike } from '../common/WeiboPostState';
 import { ShareUtil } from '../common/ShareUtil';
 import { Haptic } from '../common/Haptic';
@@ -509,6 +509,8 @@ export struct WeiboHomeTab {
         this.posts = result;
         this.currentPage = 1;
         this.hasMore = more;
+        this.newPostsPending = [];
+        this.newPostsAvailableCount = 0;
         this.timelineState = result.length > 0 ? TimelineState.Success : TimelineState.Empty;
         this.currentFirstVisibleIndex = 0;
         if (result.length > 0) {
@@ -751,16 +753,15 @@ export struct WeiboHomeTab {
     Row() {
       // 左侧头像
       Stack() {
+        SymbolGlyph($r('sys.symbol.person'))
+          .fontSize(fs(24, this.fontScale))
+          .fontColor([Theme.brand()])
         if (this.profile !== null && this.profile.avatarUrl.length > 0) {
-          Image(this.profile.avatarUrl)
+          Image(sanitizeHttpsUrl(this.profile.avatarUrl))
             .width(36)
             .height(36)
             .borderRadius(18)
             .objectFit(ImageFit.Cover)
-        } else {
-          SymbolGlyph($r('sys.symbol.person'))
-            .fontSize(fs(24, this.fontScale))
-            .fontColor([Theme.brand()])
         }
       }
       .width(36)
@@ -964,7 +965,7 @@ export struct WeiboHomeTab {
   SocialMedia(post: WeiboPost): void {
     if (post.videoUrl.length > 0 || (post.pictures.length === 0 && this.socialMediaPost(post).videoUrl.length > 0)) {
       Stack({ alignContent: Alignment.Center }) {
-        Image(post.videoCoverUrl.length > 0 ? post.videoCoverUrl : this.socialCoverUrl(post))
+        Image(sanitizeHttpsUrl(post.videoCoverUrl.length > 0 ? post.videoCoverUrl : this.socialCoverUrl(post)))
           .width('100%')
           .aspectRatio(16 / 9)
           .objectFit(ImageFit.Cover)
@@ -1008,7 +1009,7 @@ export struct WeiboHomeTab {
       .onClick((): void => { this.openPost(post); }, WEIBO_TAP_MAX_MOVEMENT)
     } else if (post.pictures.length === 1) {
       Stack({ alignContent: Alignment.BottomEnd }) {
-        Image(post.pictures[0])
+        Image(sanitizeHttpsUrl(post.pictures[0]))
           .width('100%')
           .height(Math.min(320, Math.round(Math.min(this.maxContentWidth(), 480) * 0.75)))
           .constraintSize({ maxWidth: Math.min(this.maxContentWidth(), 480) })
@@ -1040,7 +1041,7 @@ export struct WeiboHomeTab {
         ForEach(post.pictures.slice(0, post.pictures.length), (pic: string, index: number): void => {
           GridItem() {
             Stack({ alignContent: Alignment.BottomEnd }) {
-              Image(pic)
+              Image(sanitizeHttpsUrl(pic))
                 .width('100%')
                 .height(this.pictureCellHeight(post.pictures.length))
                 .objectFit(ImageFit.Cover)
@@ -1080,7 +1081,7 @@ export struct WeiboHomeTab {
         ForEach(post.pictures.slice(0, 9), (pic: string, index: number): void => {
           GridItem() {
             Stack({ alignContent: Alignment.BottomEnd }) {
-              Image(pic)
+              Image(sanitizeHttpsUrl(pic))
                 .width('100%')
                 .height(this.pictureCellHeight(post.pictures.length))
                 .objectFit(ImageFit.Cover)
@@ -1130,16 +1131,27 @@ export struct WeiboHomeTab {
   @Builder
   SocialAuthor(post: WeiboPost): void {
     Row({ space: Spacing.sm }) {
-      if (post.userAvatar.length > 0) {
-        Image(post.userAvatar)
-          .width(42)
-          .height(42)
-          .objectFit(ImageFit.Cover)
-          .borderRadius(21)
-          .clip(true)
-          .hitTestBehavior(HitTestMode.Default)
-          .onClick((): void => { this.openUserProfile(post.userId, post.userName); }, WEIBO_TAP_MAX_MOVEMENT)
+      Stack() {
+        Text(post.userName.length > 0 ? post.userName.charAt(0) : '微')
+          .fontSize(fs(18, this.fontScale))
+          .fontWeight(FontWeight.Bold)
+          .fontColor(Color.White)
+        if (post.userAvatar.length > 0) {
+          Image(sanitizeHttpsUrl(post.userAvatar))
+            .width(42)
+            .height(42)
+            .objectFit(ImageFit.Cover)
+            .borderRadius(21)
+            .clip(true)
+        }
       }
+      .width(42)
+      .height(42)
+      .borderRadius(21)
+      .backgroundColor(Theme.brand())
+      .alignContent(Alignment.Center)
+      .hitTestBehavior(HitTestMode.Default)
+      .onClick((): void => { this.openUserProfile(post.userId, post.userName); }, WEIBO_TAP_MAX_MOVEMENT)
       Column({ space: 3 }) {
         Text(post.userName)
           .fontSize(fs(15, this.fontScale))
@@ -1455,6 +1467,11 @@ export struct WeiboHomeTab {
     })
     .onScrollIndex((firstIndex: number): void => {
       if (this.isRestoringPosition) {
+        return;
+      }
+      // 用户不点提示、主动滑回顶部时视为「已读最新」：直接合入 pending 新微博并摘下胶囊。
+      if (firstIndex === 0 && this.newPostsAvailableCount > 0) {
+        this.applyNewPosts();
         return;
       }
       this.currentFirstVisibleIndex = firstIndex;
